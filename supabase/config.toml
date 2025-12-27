@@ -1,0 +1,6 @@
+[functions.openai-proxy]
+# For quick testing, the function does not require a logged-in Supabase user JWT.
+# If you plan to ship this, set this to true and add auth on the client.
+verify_jwt = false
+
+
