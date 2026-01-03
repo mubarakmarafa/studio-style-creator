@@ -42,6 +42,7 @@ export type NodeType =
   | "fillAndTexture"
   | "background"
   | "output"
+  | "imageInput"
   | "imageNode";
 
 // Base node data structure
@@ -105,6 +106,14 @@ export interface OutputNodeData extends BaseNodeData {
   [key: string]: unknown;
 }
 
+// Image Input Node (uploaded images; used as input for LLM style extraction)
+export interface ImageInputNodeData extends BaseNodeData {
+  image: string; // data URL (e.g. data:image/png;base64,...)
+  filename?: string;
+  mimeType?: string;
+  timestamp?: number;
+}
+
 // Image Node (for generated images on canvas)
 export interface ImageNodeData extends BaseNodeData {
   image: string; // data URL or base64
@@ -129,6 +138,7 @@ export type NodeData =
   | FillAndTextureNodeData
   | BackgroundNodeData
   | OutputNodeData
+  | ImageInputNodeData
   | ImageNodeData;
 
 // Graph document structure

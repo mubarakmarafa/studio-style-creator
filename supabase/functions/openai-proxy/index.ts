@@ -93,6 +93,92 @@ async function handleChat(
   return json({ text, raw }, { headers: corsHeaders(req) });
 }
 
+async function handleStyleFromImage(
+  req: Request,
+  body: { imageDataUrl?: string; model?: string; instruction?: string } | null,
+): Promise<Response> {
+  if (!OPENAI_API_KEY) {
+    return json(
+      { error: "Missing OPENAI_API_KEY (set as a Supabase secret)" },
+      { status: 500, headers: corsHeaders(req) },
+    );
+  }
+
+  const imageDataUrl = body?.imageDataUrl?.trim();
+  const model = body?.model?.trim() || "gpt-5.2";
+  const instruction =
+    body?.instruction?.trim() ||
+    [
+      "You are a style-extraction assistant.",
+      "Given the image, produce a repeatable style prompt template that can be reused with different subjects.",
+      'The style prompt MUST include a [subject] placeholder (exactly bracketed like that).',
+      "Focus on lighting, materials, rendering pipeline, composition rules, constraints (e.g., transparent alpha PNG, die-cut border).",
+      "Return ONLY valid JSON with this shape:",
+      '{ "description": string }',
+      "No markdown, no code fences.",
+    ].join("\n");
+
+  if (!imageDataUrl) {
+    return json(
+      { error: "Missing imageDataUrl" },
+      { status: 400, headers: corsHeaders(req) },
+    );
+  }
+  if (!imageDataUrl.startsWith("data:image/")) {
+    return json(
+      { error: "imageDataUrl must be a data URL starting with data:image/..." },
+      { status: 400, headers: corsHeaders(req) },
+    );
+  }
+
+  const upstream = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: instruction },
+            { type: "input_image", image_url: imageDataUrl },
+          ],
+        },
+      ],
+    }),
+  });
+
+  const rawText = await upstream.text();
+  if (!upstream.ok) {
+    let parsed: unknown = undefined;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      // ignore
+    }
+    return json(
+      {
+        error: "OpenAI request failed",
+        upstream_status: upstream.status,
+        upstream: parsed ?? rawText,
+      },
+      { status: upstream.status, headers: corsHeaders(req) },
+    );
+  }
+
+  const raw = JSON.parse(rawText) as any;
+  const text =
+    raw?.output_text ??
+    raw?.output?.[0]?.content?.[0]?.text ??
+    raw?.output?.[0]?.content?.[0]?.value ??
+    "";
+
+  return json({ text, raw }, { headers: corsHeaders(req) });
+}
+
 async function handleImage(
   req: Request,
   body: { prompt?: string; model?: string; size?: string } | null,
@@ -217,6 +303,9 @@ Deno.serve(async (req: Request) => {
     if (action === "image") {
       return await handleImage(req, body);
     }
+    if (action === "styleFromImage" || action === "style-from-image") {
+      return await handleStyleFromImage(req, body);
+    }
     return json(
       {
         error: "Missing or invalid action",
@@ -230,6 +319,7 @@ Deno.serve(async (req: Request) => {
   // Legacy routes: /functions/v1/openai-proxy/<route>
   if (path.endsWith("/chat")) return await handleChat(req, body);
   if (path.endsWith("/image")) return await handleImage(req, body);
+  if (path.endsWith("/style-from-image")) return await handleStyleFromImage(req, body);
 
   return json(
     { error: "Not found. Use /openai-proxy with {action}, or /chat /image." },

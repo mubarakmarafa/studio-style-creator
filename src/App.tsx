@@ -20,18 +20,20 @@ import { saveHistoryEntry, getHistory, deleteHistoryEntry } from "./history/hist
 import type { HistoryEntry } from "./history/historyTypes";
 import { ENV_STATE } from "./env";
 import { cn } from "./lib/utils";
+import { proxyStyleFromImage } from "./openaiProxyClient";
 
 type PanelTab = "inspector" | "generate" | "history";
 
 export function App() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<NodeData>>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedNode, setSelectedNode] = useState<Node<NodeData> | null>(null);
   const [panelTab, setPanelTab] = useState<PanelTab>("generate");
   const [subject, setSubject] = useState("");
   const [generating, setGenerating] = useState(false);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(getHistory());
+  const [autofillingNodeId, setAutofillingNodeId] = useState<string | null>(null);
 
   // Compile graph
   const compileResult = useMemo(() => compileGraph(nodes, edges), [nodes, edges]);
@@ -131,6 +133,189 @@ export function App() {
       );
     },
     [selectedNode, setNodes]
+  );
+
+  function extractJsonObject(text: string): any | null {
+    if (!text) return null;
+    const trimmed = text.trim();
+    // Common case: model returns raw JSON
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // ignore
+    }
+    // Strip code fences if present
+    const unfenced = trimmed
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/```$/i, "")
+      .trim();
+    try {
+      return JSON.parse(unfenced);
+    } catch {
+      // ignore
+    }
+    // Best-effort: take substring between first { and last }
+    const first = unfenced.indexOf("{");
+    const last = unfenced.lastIndexOf("}");
+    if (first >= 0 && last > first) {
+      const slice = unfenced.slice(first, last + 1);
+      try {
+        return JSON.parse(slice);
+      } catch {
+        // ignore
+      }
+    }
+    return null;
+  }
+
+  const autofillStyleFromImage = useCallback(
+    async (styleNodeId: string) => {
+      const styleNode = nodes.find((n) => n.id === styleNodeId);
+      if (!styleNode || styleNode.type !== "styleDescription") {
+        alert("Select a Style Description node to autofill.");
+        return;
+      }
+
+      // Find a connected image node (we accept either direction so UX is forgiving).
+      const incoming = edges.filter((e) => e.target === styleNodeId);
+      const outgoing = edges.filter((e) => e.source === styleNodeId);
+
+      const candidateNodes: Array<Node<NodeData> | undefined> = [
+        ...incoming.map((e) => nodes.find((n) => n.id === e.source)),
+        ...outgoing.map((e) => nodes.find((n) => n.id === e.target)),
+      ];
+
+      const imageNode =
+        candidateNodes.find((n) => n?.type === "imageInput" || n?.type === "imageNode") ?? null;
+
+      const imageDataUrl = (imageNode?.data as any)?.image as string | undefined;
+      if (!imageNode) {
+        alert(
+          "No image node connected. Connect an Image Input (Upload) node (or a generated Image node) to this Style Description node.",
+        );
+        return;
+      }
+      if (!imageDataUrl || !String(imageDataUrl).trim()) {
+        alert("Image node is connected, but no image is uploaded yet. Upload an image in the Image Input node first.");
+        return;
+      }
+
+      // BFS downstream from the style node (so we can optionally fill connected style blocks).
+      const reachable = new Set<string>();
+      const queue: string[] = [styleNodeId];
+      while (queue.length) {
+        const cur = queue.shift()!;
+        if (reachable.has(cur)) continue;
+        reachable.add(cur);
+        edges
+          .filter((e) => e.source === cur)
+          .forEach((e) => {
+            if (!reachable.has(e.target)) queue.push(e.target);
+          });
+      }
+
+      setAutofillingNodeId(styleNodeId);
+      try {
+        const instruction = [
+          "You are a style-extraction assistant for an image-generation 'Style Builder'.",
+          "Given the image, output a repeatable style description template that can be reused with different subjects.",
+          "The description MUST include a [subject] placeholder (exactly bracketed).",
+          "Prefer concrete constraints: renderer/tooling, lighting, materials, camera/perspective, background rules, output format, sticker/die-cut border if present.",
+          "",
+          "Return ONLY valid JSON (no markdown, no code fences) with this shape:",
+          "{",
+          '  "description": string,',
+          '  "lineQualityType": string | null,',
+          '  "colorPaletteRange": string | null,',
+          '  "lightingType": string | null,',
+          '  "perspective": string | null,',
+          '  "fillAndTextureFilledAreas": string | null,',
+          '  "backgroundType": string | null,',
+          '  "backgroundStyle": string | null,',
+          '  "outputFormat": string | null,',
+          '  "outputCanvasRatio": string | null',
+          "}",
+          "",
+          "Example of the kind of description to write:",
+          "Generate a [subject] as a 3D object rendered in Blender or Octane. The design should feature realistic lighting and dimensional shading, and it must be exported as a transparent alpha PNG (no background, no gradients, no checkerboards). Apply a white die-cut border around the object for a sticker-style appearance. Follow this style:",
+        ].join("\n");
+
+        const resp = await proxyStyleFromImage(imageDataUrl, {
+          // You can change this to a newer model you have access to.
+          model: "gpt-5.2",
+          instruction,
+        });
+
+        const parsed = extractJsonObject(resp.text);
+        if (!parsed || typeof parsed !== "object") {
+          throw new Error("Model did not return valid JSON.");
+        }
+
+        const nextDescription = typeof parsed.description === "string" ? parsed.description : "";
+
+        setNodes((nds) =>
+          nds.map((n) => {
+            if (!reachable.has(n.id)) return n;
+
+            if (n.id === styleNodeId) {
+              return { ...n, data: { ...(n.data as any), description: nextDescription } };
+            }
+
+            const d = (n.data ?? {}) as any;
+            const shouldFill = (key: string) => {
+              const v = d?.[key];
+              return typeof v !== "string" || v.trim().length === 0;
+            };
+
+            switch (n.type) {
+              case "lineQuality":
+                return parsed.lineQualityType && shouldFill("type")
+                  ? { ...n, data: { ...(n.data as any), type: parsed.lineQualityType } }
+                  : n;
+              case "colorPalette":
+                return parsed.colorPaletteRange && shouldFill("range")
+                  ? { ...n, data: { ...(n.data as any), range: parsed.colorPaletteRange } }
+                  : n;
+              case "lighting":
+                return parsed.lightingType && shouldFill("type")
+                  ? { ...n, data: { ...(n.data as any), type: parsed.lightingType } }
+                  : n;
+              case "perspective":
+                return parsed.perspective && shouldFill("perspective")
+                  ? { ...n, data: { ...(n.data as any), perspective: parsed.perspective } }
+                  : n;
+              case "fillAndTexture":
+                return parsed.fillAndTextureFilledAreas && shouldFill("filled_areas")
+                  ? {
+                      ...n,
+                      data: { ...(n.data as any), filled_areas: parsed.fillAndTextureFilledAreas },
+                    }
+                  : n;
+              case "background": {
+                const next: any = { ...(n.data as any) };
+                if (parsed.backgroundType && shouldFill("type")) next.type = parsed.backgroundType;
+                if (parsed.backgroundStyle && shouldFill("style")) next.style = parsed.backgroundStyle;
+                return next !== n.data ? { ...n, data: next } : n;
+              }
+              case "output": {
+                const next: any = { ...(n.data as any) };
+                if (parsed.outputFormat && shouldFill("format")) next.format = parsed.outputFormat;
+                if (parsed.outputCanvasRatio && shouldFill("canvas_ratio"))
+                  next.canvas_ratio = parsed.outputCanvasRatio;
+                return next !== n.data ? { ...n, data: next } : n;
+              }
+              default:
+                return n;
+            }
+          }),
+        );
+      } catch (e) {
+        alert(`Autofill failed: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        setAutofillingNodeId(null);
+      }
+    },
+    [edges, nodes, setNodes],
   );
 
   // Generate image
@@ -233,6 +418,12 @@ VITE_SUPABASE_ANON_KEY=...`}
           <h2 className="text-sm font-semibold mb-3">Node Palette</h2>
           <div className="space-y-2">
             <button
+              onClick={() => addNode("imageInput", "Image Input", { image: "" } as any)}
+              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+            >
+              Image Input (Upload)
+            </button>
+            <button
               onClick={() => addNode("subject", "Subject", { subject: "" })}
               className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
             >
@@ -243,6 +434,49 @@ VITE_SUPABASE_ANON_KEY=...`}
               className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
             >
               Style Description
+            </button>
+            <div className="pt-2 border-t" />
+            <button
+              onClick={() => addNode("lineQuality", "Line Quality", { type: "" } as any)}
+              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+            >
+              Line Quality
+            </button>
+            <button
+              onClick={() => addNode("colorPalette", "Color Palette", { range: "" } as any)}
+              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+            >
+              Color Palette
+            </button>
+            <button
+              onClick={() => addNode("lighting", "Lighting", { type: "" } as any)}
+              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+            >
+              Lighting
+            </button>
+            <button
+              onClick={() => addNode("perspective", "Perspective", { perspective: "" } as any)}
+              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+            >
+              Perspective
+            </button>
+            <button
+              onClick={() => addNode("fillAndTexture", "Fill & Texture", { filled_areas: "" } as any)}
+              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+            >
+              Fill & Texture
+            </button>
+            <button
+              onClick={() => addNode("background", "Background", { type: "", style: "" } as any)}
+              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+            >
+              Background
+            </button>
+            <button
+              onClick={() => addNode("output", "Output", { format: "PNG", canvas_ratio: "1:1" } as any)}
+              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+            >
+              Output
             </button>
           </div>
         </aside>
@@ -310,6 +544,8 @@ VITE_SUPABASE_ANON_KEY=...`}
               <InspectorPanel
                 node={selectedNode}
                 onUpdate={updateNodeData}
+                onAutofillStyleFromImage={autofillStyleFromImage}
+                autofilling={autofillingNodeId === selectedNode?.id}
               />
             )}
 
@@ -356,9 +592,13 @@ VITE_SUPABASE_ANON_KEY=...`}
 function InspectorPanel({
   node,
   onUpdate,
+  onAutofillStyleFromImage,
+  autofilling,
 }: {
   node: Node<NodeData> | null;
   onUpdate: (updates: Partial<NodeData>) => void;
+  onAutofillStyleFromImage: (styleNodeId: string) => void;
+  autofilling: boolean;
 }) {
   if (!node) {
     return <div className="text-sm text-muted-foreground">Select a node to edit</div>;
@@ -374,13 +614,8 @@ function InspectorPanel({
       </div>
 
       <div>
-        <label className="text-xs font-semibold text-muted-foreground">Label</label>
-        <input
-          type="text"
-          value={data.label || ""}
-          onChange={(e) => onUpdate({ label: e.target.value })}
-          className="w-full mt-1 px-2 py-1 text-sm border rounded bg-background"
-        />
+        <label className="text-xs font-semibold text-muted-foreground">Name</label>
+        <div className="text-sm mt-1">{data.label || type || "Node"}</div>
       </div>
 
       {/* Type-specific fields */}
@@ -410,6 +645,22 @@ function InspectorPanel({
             className="w-full mt-1 px-2 py-1 text-sm border rounded bg-background"
             placeholder="e.g., retro robot vacuum"
           />
+        </div>
+      )}
+
+      {type === "styleDescription" && (
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-muted-foreground">Autofill</div>
+          <button
+            onClick={() => onAutofillStyleFromImage(node.id)}
+            disabled={autofilling}
+            className="w-full px-3 py-2 text-sm bg-secondary text-secondary-foreground rounded hover:bg-secondary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {autofilling ? "Autofilling..." : "Autofill from connected image"}
+          </button>
+          <div className="text-[11px] text-muted-foreground">
+            Connect an <span className="font-medium">Image Input (Upload)</span> node into this node, then click autofill.
+          </div>
         </div>
       )}
 

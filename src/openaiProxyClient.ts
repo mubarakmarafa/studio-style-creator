@@ -12,6 +12,11 @@ type ProxyImageResponse = {
   raw?: unknown;
 };
 
+type ProxyStyleFromImageResponse = {
+  text: string;
+  raw?: unknown;
+};
+
 function functionsBaseUrl(): string {
   if (!ENV_STATE.ok) {
     throw new Error(ENV_STATE.message ?? "Missing required Vite env vars.");
@@ -110,6 +115,17 @@ export async function proxyImage(
   return await postJson<ProxyImageResponse>(
     "/openai-proxy/image",
     { prompt, model: opts?.model, size: opts?.size },
+    opts?.signal,
+  );
+}
+
+export async function proxyStyleFromImage(
+  imageDataUrl: string,
+  opts?: { model?: string; instruction?: string; signal?: AbortSignal },
+): Promise<ProxyStyleFromImageResponse> {
+  return await postJson<ProxyStyleFromImageResponse>(
+    "/openai-proxy/style-from-image",
+    { imageDataUrl, model: opts?.model, instruction: opts?.instruction },
     opts?.signal,
   );
 }
