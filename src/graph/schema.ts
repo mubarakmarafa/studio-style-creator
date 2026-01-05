@@ -15,7 +15,21 @@ export interface FFAStyleTemplate {
     description?: string;
     perspective?: string;
     line_quality?: { type?: string; [key: string]: unknown };
-    color_palette?: { range?: string; [key: string]: unknown };
+    color_palette?: {
+      range?: string;
+      /**
+       * Structured palette extracted from an image (hex values).
+       * This is useful to persist for downstream generation or auditing.
+       */
+      hexes?: string[];
+      /**
+       * Optional provenance about how the palette was produced.
+       */
+      sourceImageNodeId?: string;
+      extractionMethod?: string;
+      extractedAt?: number;
+      [key: string]: unknown;
+    };
     lighting?: { type?: string; [key: string]: unknown };
     fill_and_texture?: { filled_areas?: string; [key: string]: unknown };
     textures?: { material_finish?: string; [key: string]: unknown };
@@ -42,6 +56,8 @@ export type NodeType =
   | "fillAndTexture"
   | "background"
   | "output"
+  | "compiler"
+  | "generate"
   | "imageInput"
   | "imageNode";
 
@@ -75,6 +91,10 @@ export interface LineQualityNodeData extends BaseNodeData {
 
 export interface ColorPaletteNodeData extends BaseNodeData {
   range: string;
+  hexes?: string[];
+  sourceImageNodeId?: string;
+  extractionMethod?: string;
+  extractedAt?: number;
   [key: string]: unknown;
 }
 
@@ -126,6 +146,35 @@ export interface ImageNodeData extends BaseNodeData {
   timestamp: number;
 }
 
+// Compiler Node (compiles upstream nodes to JSON)
+export interface CompilerNodeData extends BaseNodeData {
+  /**
+   * UI-only: whether to show the compiled JSON preview in the node.
+   * (Keeps canvas tidy when you only want the node as a "compile step".)
+   */
+  showJson?: boolean;
+}
+
+// Generate Node (generates image directly inside the node)
+export interface GenerateNodeData extends BaseNodeData {
+  /**
+   * Optional override. If empty, we use compiledJson.object_specification.subject.
+   */
+  subjectOverride?: string;
+  /**
+   * Persisted generated output so it's visible on reload (may be stripped if too large).
+   */
+  image?: string;
+  /**
+   * Debugging / UX info.
+   */
+  lastPrompt?: string;
+  lastError?: string;
+  lastGeneratedAt?: number;
+  model?: string;
+  size?: string;
+}
+
 // Union type for all node data
 export type NodeData =
   | TemplateRootNodeData
@@ -138,6 +187,8 @@ export type NodeData =
   | FillAndTextureNodeData
   | BackgroundNodeData
   | OutputNodeData
+  | CompilerNodeData
+  | GenerateNodeData
   | ImageInputNodeData
   | ImageNodeData;
 

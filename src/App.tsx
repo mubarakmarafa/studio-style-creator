@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -13,7 +13,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { nodeTypes } from "./graph/nodeTypes";
-import { compileGraph, generatePrompt } from "./graph/compiler";
+import { compileGraph, generateJsonPrompt } from "./graph/compiler";
 import type { NodeData, ImageNodeData, FFAStyleTemplate } from "./graph/schema";
 import { generateImage } from "./generation/supabaseImageClient";
 import { saveHistoryEntry, getHistory, deleteHistoryEntry } from "./history/historyStore";
@@ -21,6 +21,11 @@ import type { HistoryEntry } from "./history/historyTypes";
 import { ENV_STATE } from "./env";
 import { cn } from "./lib/utils";
 import { proxyStyleFromImage } from "./openaiProxyClient";
+import {
+  clearWorkspaceSnapshot,
+  loadWorkspaceSnapshot,
+  saveWorkspaceSnapshot,
+} from "./graph/workspacePersistence";
 
 type PanelTab = "inspector" | "generate" | "history";
 
@@ -34,6 +39,18 @@ export function App() {
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(getHistory());
   const [autofillingNodeId, setAutofillingNodeId] = useState<string | null>(null);
+  const lastSavedRef = useRef<string>("");
+
+  // Rehydrate workspace from local storage once on mount.
+  useEffect(() => {
+    const snap = loadWorkspaceSnapshot();
+    if (!snap) return;
+
+    setNodes(snap.nodes);
+    setEdges(snap.edges);
+    if (typeof snap.subject === "string") setSubject(snap.subject);
+    setSelectedNode(null);
+  }, [setEdges, setNodes]);
 
   // Compile graph
   const compileResult = useMemo(() => compileGraph(nodes, edges), [nodes, edges]);
@@ -75,6 +92,19 @@ export function App() {
     });
   }, [setNodes]);
 
+  // Persist workspace locally (debounced) so refreshes don't lose work.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      const payload = { nodes, edges, subject };
+      const json = JSON.stringify(payload);
+      if (json === lastSavedRef.current) return;
+      lastSavedRef.current = json;
+      saveWorkspaceSnapshot(payload);
+    }, 250);
+
+    return () => window.clearTimeout(t);
+  }, [nodes, edges, subject]);
+
   // Handle node selection
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node<NodeData>) => {
     setSelectedNode(node);
@@ -102,7 +132,9 @@ export function App() {
       setNodes((nds) => [...nds, newNode]);
 
       // For non-root nodes, auto-connect from Template Root (keeps compile simple)
-      if (type !== "templateRoot") {
+      // NOTE: Do NOT auto-connect into pipeline nodes (compiler/generate). They should compile ONLY
+      // what the user explicitly wires in, otherwise Template Root becomes a confusing "phantom input".
+      if (type !== "templateRoot" && type !== "compiler" && type !== "generate") {
         const root = nodes.find((n) => n.type === "templateRoot");
         if (root) {
           setEdges((eds) => [
@@ -320,15 +352,19 @@ export function App() {
 
   // Generate image
   const handleGenerate = useCallback(async () => {
-    if (!compileResult.template || !subject.trim()) return;
+    if (!compileResult.template) return;
     if (!ENV_STATE.ok) {
       alert("Missing Supabase configuration. Check your .env.local file.");
       return;
     }
 
+    const effectiveSubject =
+      subject.trim().length > 0 ? subject.trim() : compileResult.template.object_specification.subject || "";
+    if (!effectiveSubject.trim()) return;
+
     setGenerating(true);
     try {
-      const finalPrompt = generatePrompt(compileResult.template, subject);
+      const finalPrompt = generateJsonPrompt(compileResult.template, effectiveSubject);
       const result = await generateImage(finalPrompt, {
         model: "gpt-image-1",
         size: compileResult.template.output?.canvas_ratio === "1:1" ? "1024x1024" : "1024x1024",
@@ -339,7 +375,7 @@ export function App() {
 
       // Save to history
       const entry = saveHistoryEntry({
-        subject,
+        subject: effectiveSubject,
         compiledJson: compileResult.template,
         finalPrompt,
         generationParams: {
@@ -414,69 +450,83 @@ VITE_SUPABASE_ANON_KEY=...`}
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left: Node Palette */}
-        <aside className="w-64 border-r p-4 overflow-y-auto bg-muted/30">
-          <h2 className="text-sm font-semibold mb-3">Node Palette</h2>
-          <div className="space-y-2">
+        <aside className="w-64 border-r p-4 bg-muted/30 flex flex-col">
+          <div className="flex-1 overflow-y-auto">
+            <h2 className="text-sm font-semibold mb-3">Node Palette</h2>
+            <div className="space-y-2">
+              <button
+                onClick={() => addNode("imageInput", "Image Input", { image: "" } as any)}
+                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+              >
+                Image Input (Upload)
+              </button>
+              <button
+                onClick={() => addNode("subject", "Subject", { subject: "" })}
+                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+              >
+                Subject
+              </button>
+              <button
+                onClick={() =>
+                  addNode("styleDescription", "Style Description", { description: "" } as any)
+                }
+                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+              >
+                Style Description
+              </button>
+              <button
+                onClick={() => addNode("colorPalette", "Color Palette", { range: "" } as any)}
+                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+              >
+                Color Palette
+              </button>
+              <div className="pt-2 border-t" />
+              <button
+                onClick={() => addNode("compiler", "Compiler", { showJson: true } as any)}
+                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+              >
+                Compiler (JSON)
+              </button>
+              <button
+                onClick={() =>
+                  addNode("generate", "Generate", {
+                    subjectOverride: "",
+                    image: "",
+                    model: "gpt-image-1",
+                    size: "1024x1024",
+                  } as any)
+                }
+                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+              >
+                Generate (in-node)
+              </button>
+            </div>
+          </div>
+
+          <div className="pt-3 mt-3 border-t space-y-2">
             <button
-              onClick={() => addNode("imageInput", "Image Input", { image: "" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+              onClick={() => window.location.reload()}
+              className="w-full px-3 py-2 text-sm border rounded hover:bg-accent"
+              title="Reload the page (your workspace is saved locally)"
             >
-              Image Input (Upload)
+              Refresh
             </button>
             <button
-              onClick={() => addNode("subject", "Subject", { subject: "" })}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+              onClick={() => {
+                const ok = window.confirm("Clear saved workspace and start fresh?");
+                if (!ok) return;
+                clearWorkspaceSnapshot();
+                setSelectedNode(null);
+                setPanelTab("generate");
+                setGeneratedImage(null);
+                setSubject("");
+                setEdges([]);
+                setNodes([]);
+              }}
+              className="w-full px-3 py-2 text-sm border rounded hover:bg-accent text-destructive"
+              title="Clear locally saved workspace"
             >
-              Subject
-            </button>
-            <button
-              onClick={() => addNode("styleDescription", "Style Description", { description: "" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-            >
-              Style Description
-            </button>
-            <div className="pt-2 border-t" />
-            <button
-              onClick={() => addNode("lineQuality", "Line Quality", { type: "" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-            >
-              Line Quality
-            </button>
-            <button
-              onClick={() => addNode("colorPalette", "Color Palette", { range: "" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-            >
-              Color Palette
-            </button>
-            <button
-              onClick={() => addNode("lighting", "Lighting", { type: "" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-            >
-              Lighting
-            </button>
-            <button
-              onClick={() => addNode("perspective", "Perspective", { perspective: "" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-            >
-              Perspective
-            </button>
-            <button
-              onClick={() => addNode("fillAndTexture", "Fill & Texture", { filled_areas: "" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-            >
-              Fill & Texture
-            </button>
-            <button
-              onClick={() => addNode("background", "Background", { type: "", style: "" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-            >
-              Background
-            </button>
-            <button
-              onClick={() => addNode("output", "Output", { format: "PNG", canvas_ratio: "1:1" } as any)}
-              className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-            >
-              Output
+              Reset workspace
             </button>
           </div>
         </aside>
@@ -559,12 +609,16 @@ VITE_SUPABASE_ANON_KEY=...`}
                 generatedImage={generatedImage}
                 onAddToCanvas={() => {
                   if (generatedImage && compileResult.template) {
+                    const effectiveSubject =
+                      subject.trim().length > 0
+                        ? subject.trim()
+                        : compileResult.template.object_specification.subject || "";
                     const entry: HistoryEntry = {
                       id: crypto.randomUUID(),
                       timestamp: Date.now(),
-                      subject,
+                      subject: effectiveSubject,
                       compiledJson: compileResult.template,
-                      finalPrompt: generatePrompt(compileResult.template, subject),
+                      finalPrompt: generateJsonPrompt(compileResult.template, effectiveSubject),
                       generationParams: { model: "gpt-image-1", size: "1024x1024" },
                       image: generatedImage,
                     };
@@ -729,11 +783,13 @@ function GeneratePanel({
   generatedImage: string | null;
   onAddToCanvas: () => void;
 }) {
+  const effectiveSubject =
+    subject.trim().length > 0 ? subject.trim() : compileResult.template?.object_specification?.subject || "";
   return (
     <div className="space-y-4">
       <div>
         <label className="text-xs font-semibold text-muted-foreground mb-1 block">
-          Subject
+          Subject (optional override)
         </label>
         <input
           type="text"
@@ -778,7 +834,7 @@ function GeneratePanel({
 
       <button
         onClick={onGenerate}
-        disabled={!compileResult.template || !subject.trim() || generating}
+        disabled={!compileResult.template || !effectiveSubject.trim() || generating}
         className="w-full px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {generating ? "Generating..." : "Generate Image"}

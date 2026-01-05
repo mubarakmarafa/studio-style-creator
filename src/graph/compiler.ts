@@ -24,6 +24,8 @@ export interface CompileResult {
   errors: CompileError[];
 }
 
+export type CompileMode = "fromTemplateRoot" | "upstreamOfTarget";
+
 // Deep merge utility
 function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
   const output = { ...target };
@@ -76,6 +78,64 @@ function getConnectedNodes(
   }
 
   return result;
+}
+
+function getUpstreamNodes(
+  targetId: string,
+  nodes: Node<NodeData>[],
+  edges: Edge[]
+): Node<NodeData>[] {
+  const visited = new Set<string>();
+  const result: Node<NodeData>[] = [];
+  const queue: string[] = [targetId];
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    if (visited.has(currentId)) continue;
+    visited.add(currentId);
+
+    if (currentId !== targetId) {
+      const node = nodes.find((n) => n.id === currentId);
+      if (node) result.push(node);
+    }
+
+    // Walk "backwards": any edge whose target is current becomes an upstream dependency.
+    edges
+      .filter((e) => e.target === currentId)
+      .forEach((e) => {
+        if (!visited.has(e.source)) queue.push(e.source);
+      });
+  }
+
+  return result;
+}
+
+function typePriority(type: string | undefined): number {
+  // Lower number = earlier merge (later nodes can overwrite).
+  switch (type) {
+    case "templateRoot":
+      return 0;
+    case "subject":
+      return 10;
+    case "styleDescription":
+      return 20;
+    case "lineQuality":
+      return 30;
+    case "colorPalette":
+      return 40;
+    case "lighting":
+      return 50;
+    case "perspective":
+      return 60;
+    case "fillAndTexture":
+      return 70;
+    case "background":
+      return 80;
+    case "output":
+      return 90;
+    default:
+      return 1000;
+  }
 }
 
 // Convert node to JSON patch
@@ -211,6 +271,32 @@ function nodeToPatch(node: Node<NodeData>): Record<string, unknown> | null {
   }
 }
 
+function normalizeTemplate(partial: Partial<FFAStyleTemplate>): FFAStyleTemplate {
+  const template: Partial<FFAStyleTemplate> = { ...partial };
+
+  if (!template.metadata) {
+    template.metadata = { type: { category: "Images" } };
+  }
+  if (!template.metadata.type) {
+    template.metadata.type = { category: "Images" };
+  }
+  if (!template.metadata.type.category) {
+    template.metadata.type.category = "Images";
+  }
+
+  // Ensure object_specification exists
+  if (!template.object_specification) {
+    template.object_specification = { subject: "" };
+  }
+
+  // Ensure output exists
+  if (!template.output) {
+    template.output = { format: "PNG", canvas_ratio: "1:1" };
+  }
+
+  return template as FFAStyleTemplate;
+}
+
 // Compile graph to FFAStyles JSON template
 export function compileGraph(
   nodes: Node<NodeData>[],
@@ -240,41 +326,67 @@ export function compileGraph(
     }
   }
 
-  // Minimal mode: keep compile permissive; generation UI can enforce subject etc.
-
-  // Ensure object_specification exists
-  if (!template.object_specification) {
-    template.object_specification = { subject: "" };
-  }
-
-  // Ensure output exists
-  if (!template.output) {
-    template.output = { format: "PNG", canvas_ratio: "1:1" };
-  }
-
   return {
-    template: template as FFAStyleTemplate,
+    template: normalizeTemplate(template),
     errors,
   };
 }
 
-// Generate final prompt string from template (for image generation)
-export function generatePrompt(template: FFAStyleTemplate, subject?: string): string {
-  const subj = subject || template.object_specification.subject || "";
-  const parts: string[] = [subj];
+/**
+ * Compile only the nodes that feed into a specific target node.
+ * Useful for "Compiler" and "Generate" nodes on the canvas.
+ */
+export function compileUpstream(
+  targetNodeId: string,
+  nodes: Node<NodeData>[],
+  edges: Edge[]
+): CompileResult {
+  const errors: CompileError[] = [];
+  const upstream = getUpstreamNodes(targetNodeId, nodes, edges);
 
-  if (template.drawing_style) {
-    const style = template.drawing_style;
-    if (style.description) parts.push(style.description);
-    if (style.perspective) parts.push(style.perspective);
-    if (style.line_quality?.type) parts.push(style.line_quality.type);
-    if (style.color_palette?.range) parts.push(style.color_palette.range);
-    if (style.lighting?.type) parts.push(style.lighting.type);
-    if (style.fill_and_texture?.filled_areas) parts.push(style.fill_and_texture.filled_areas);
-    if (style.textures?.material_finish) parts.push(style.textures.material_finish);
-    if (style.background?.type) parts.push(`background: ${style.background.type}`);
+  if (upstream.length === 0) {
+    return {
+      template: normalizeTemplate({}),
+      errors: [{ message: "No inputs connected. Connect nodes into this Compiler/Generate node." }],
+    };
   }
 
-  return parts.filter(Boolean).join(", ");
+  // Deterministic merge order: type priority, then id.
+  const ordered = [...upstream].sort((a, b) => {
+    const pa = typePriority(a.type);
+    const pb = typePriority(b.type);
+    if (pa !== pb) return pa - pb;
+    return a.id.localeCompare(b.id);
+  });
+
+  let template: Partial<FFAStyleTemplate> = {};
+  for (const node of ordered) {
+    const patch = nodeToPatch(node);
+    if (patch) template = deepMerge(template, patch) as Partial<FFAStyleTemplate>;
+  }
+
+  return { template: normalizeTemplate(template), errors };
+}
+
+/**
+ * The prompt we send to the image API.
+ * You asked for "just the JSON prompt without parsing it", so we stringify the compiled template
+ * as-is, optionally overriding only `object_specification.subject`.
+ */
+export function generateJsonPrompt(template: FFAStyleTemplate, subjectOverride?: string): string {
+  const subj = (subjectOverride ?? "").trim();
+  const next: FFAStyleTemplate =
+    subj.length > 0
+      ? {
+          ...template,
+          object_specification: {
+            ...(template.object_specification ?? { subject: "" }),
+            subject: subj,
+          },
+        }
+      : template;
+
+  // Keep it compact for tokens while still being valid JSON.
+  return JSON.stringify(next);
 }
 
