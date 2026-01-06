@@ -144,6 +144,10 @@ export interface ImageNodeData extends BaseNodeData {
     size: string;
   };
   timestamp: number;
+  /**
+   * UI-only (optional): allows showing a canvas placeholder while an image is being generated.
+   */
+  status?: "generating" | "ready" | "error";
 }
 
 // Compiler Node (compiles upstream nodes to JSON)

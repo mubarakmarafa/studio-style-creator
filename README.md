@@ -23,6 +23,25 @@ Notes:
 - The key above is exactly the publishable key (no trailing `?`).
 - After editing `.env.local`, **stop and restart** `npm run dev` (Vite only loads env vars on startup).
 
+## Deploy to Vercel (fixes “Configuration Required”)
+
+That “Configuration Required / Missing VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY” screen happens on Vercel when the
+frontend is deployed without the required Vite env vars.
+
+1. In the Supabase dashboard, open your project:
+   - **Project URL**: `Project Settings → API → Project URL`
+   - **Key**: `Project Settings → API → Project API keys`
+     - Prefer the **publishable** key (`sb_publishable_...`) for browser usage (legacy `anon` also works).
+2. In Vercel: `Project → Settings → Environment Variables`
+   - Add `VITE_SUPABASE_URL`
+   - Add `VITE_SUPABASE_ANON_KEY`
+   - (Optional) Add `VITE_SUPABASE_FUNCTIONS_BASE_URL` if your Supabase URL isn’t standard
+   - Make sure you add them to the correct environment(s): **Production** (and **Preview** if you use preview deploys).
+3. **Redeploy** (env vars are baked into the Vite build output):
+   - Trigger a new deployment in Vercel (or “Redeploy” the latest).
+
+Tip: there’s a copy/paste template in `env.example` for local development.
+
 ## 2) Install + run the frontend
 
 ```bash
