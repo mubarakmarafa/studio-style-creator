@@ -4,6 +4,7 @@ import {
   Background,
   Controls,
   MiniMap,
+  SelectionMode,
   addEdge,
   useNodesState,
   useEdgesState,
@@ -41,7 +42,7 @@ export function App() {
   const [history, setHistory] = useState<HistoryEntry[]>(getHistory());
   const [autofillingNodeId, setAutofillingNodeId] = useState<string | null>(null);
   const [zenMode, setZenMode] = useState(false);
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const lastSavedRef = useRef<string>("");
   const reactFlowWrapperRef = useRef<HTMLDivElement | null>(null);
   const reactFlowInstanceRef = useRef<ReactFlowInstance<Node<NodeData>, Edge> | null>(null);
@@ -162,7 +163,7 @@ export function App() {
       // For non-root nodes, auto-connect from Template Root (keeps compile simple)
       // NOTE: Do NOT auto-connect into pipeline nodes (compiler/generate). They should compile ONLY
       // what the user explicitly wires in, otherwise Template Root becomes a confusing "phantom input".
-      if (type !== "templateRoot" && type !== "compiler" && type !== "generate") {
+      if (type !== "templateRoot" && type !== "compiler" && type !== "generate" && type !== "refine") {
         const root = nodes.find((n) => n.type === "templateRoot");
         if (root) {
           setEdges((eds) => [
@@ -406,6 +407,98 @@ export function App() {
     [edges, nodes, setNodes],
   );
 
+  const autofillFromConnectedRefine = useCallback(
+    async (targetNodeId: string) => {
+      const target = nodes.find((n) => n.id === targetNodeId);
+      if (!target) {
+        alert("Select a node to autofill.");
+        return;
+      }
+
+      // Find a connected refine node (either direction).
+      const incoming = edges.filter((e) => e.target === targetNodeId);
+      const outgoing = edges.filter((e) => e.source === targetNodeId);
+
+      const candidateNodes: Array<Node<NodeData> | undefined> = [
+        ...incoming.map((e) => nodes.find((n) => n.id === e.source)),
+        ...outgoing.map((e) => nodes.find((n) => n.id === e.target)),
+      ];
+
+      const refineNode = candidateNodes.find((n) => n?.type === "refine") ?? null;
+      const lastResult = (refineNode?.data as any)?.lastResult as
+        | { improvedTemplate?: FFAStyleTemplate; nodeFieldEdits?: Record<string, unknown> }
+        | undefined;
+
+      const improved = lastResult?.improvedTemplate;
+      const nodeFieldEdits = (lastResult?.nodeFieldEdits ?? {}) as Record<string, unknown>;
+      if (!refineNode) {
+        alert("No Refine node connected. Connect a Refine node to this node first.");
+        return;
+      }
+      if (!improved) {
+        alert("Connected Refine node has no result yet. Run Refine first.");
+        return;
+      }
+
+      const apply = (nodeType: string, base: any) => {
+        const next: any = { ...(base ?? {}) };
+        if (nodeType === "subject") {
+          const s = improved?.object_specification?.subject;
+          if (typeof s === "string") next.subject = s;
+        }
+        if (nodeType === "styleDescription") {
+          const d = improved?.drawing_style?.description;
+          if (typeof d === "string") next.description = d;
+        }
+        if (nodeType === "colorPalette") {
+          const range = improved?.drawing_style?.color_palette?.range;
+          const hexes = improved?.drawing_style?.color_palette?.hexes;
+          if (typeof range === "string") next.range = range;
+          if (Array.isArray(hexes)) next.hexes = hexes;
+        }
+        if (nodeType === "lineQuality") {
+          const t = improved?.drawing_style?.line_quality?.type;
+          if (typeof t === "string") next.type = t;
+        }
+        if (nodeType === "lighting") {
+          const t = improved?.drawing_style?.lighting?.type;
+          if (typeof t === "string") next.type = t;
+        }
+        if (nodeType === "perspective") {
+          const p = improved?.drawing_style?.perspective;
+          if (typeof p === "string") next.perspective = p;
+        }
+        if (nodeType === "fillAndTexture") {
+          const f = improved?.drawing_style?.fill_and_texture?.filled_areas;
+          if (typeof f === "string") next.filled_areas = f;
+        }
+        if (nodeType === "background") {
+          const t = improved?.drawing_style?.background?.type;
+          const s = improved?.drawing_style?.background?.style;
+          if (typeof t === "string") next.type = t;
+          if (typeof s === "string") next.style = s;
+        }
+        if (nodeType === "output") {
+          const format = (improved as any)?.output?.format;
+          const ratio = (improved as any)?.output?.canvas_ratio;
+          if (typeof format === "string") next.format = format;
+          if (typeof ratio === "string") next.canvas_ratio = ratio;
+        }
+
+        const edits = (nodeFieldEdits as any)?.[nodeType];
+        if (edits && typeof edits === "object" && !Array.isArray(edits)) {
+          Object.assign(next, edits);
+        }
+        return next;
+      };
+
+      setNodes((nds) =>
+        nds.map((n) => (n.id === targetNodeId ? { ...n, data: apply(n.type ?? "unknown", n.data) } : n)),
+      );
+    },
+    [edges, nodes, setNodes],
+  );
+
   // Generate image
   const handleGenerate = useCallback(async () => {
     if (!compileResult.template) return;
@@ -542,6 +635,20 @@ VITE_SUPABASE_ANON_KEY=...`}
                 >
                   Color Palette
                 </button>
+                <button
+                  onClick={() =>
+                    addNode("background", "Background", {
+                      type: "scene",
+                      style:
+                        "Create a coherent scene background that complements the subject. Keep the subject clear and centered; avoid clutter.",
+                      color: "#ffffff",
+                      outlineWidthPx: 24,
+                    } as any)
+                  }
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Background
+                </button>
                 <div className="pt-2 border-t" />
                 <button
                   onClick={() => addNode("compiler", "Compiler", { showJson: true } as any)}
@@ -561,6 +668,19 @@ VITE_SUPABASE_ANON_KEY=...`}
                   className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
                 >
                   Generate (in-node)
+                </button>
+                <button
+                  onClick={() =>
+                    addNode("refine", "Refine", {
+                      feedback: "",
+                      sourceImageNodeId: "",
+                      generatedImageNodeId: "",
+                      model: "gpt-5.2",
+                    } as any)
+                  }
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Refine (new branch)
                 </button>
               </div>
             </div>
@@ -607,6 +727,14 @@ VITE_SUPABASE_ANON_KEY=...`}
             fitView
             minZoom={0.05}
             maxZoom={8}
+            // Interaction: make left-drag box-select (multi-select), and reserve panning for trackpad scroll / Space+drag / middle click.
+            selectionOnDrag
+            selectionMode={SelectionMode.Partial}
+            panOnDrag={[1, 2]}
+            panActivationKeyCode="Space"
+            panOnScroll
+            zoomOnScroll={false}
+            multiSelectionKeyCode="Shift"
             onInit={(instance) => {
               reactFlowInstanceRef.current = instance;
             }}
@@ -629,9 +757,9 @@ VITE_SUPABASE_ANON_KEY=...`}
               <button
                 onClick={() => setRightPanelOpen((v) => !v)}
                 className="px-2 py-1 text-xs border rounded bg-background/90 backdrop-blur hover:bg-accent"
-                title={rightPanelOpen ? "Hide right panel" : "Show right panel"}
+                title={rightPanelOpen ? "Hide inspector" : "Show inspector"}
               >
-                {rightPanelOpen ? "Hide panel" : "Show panel"}
+                {rightPanelOpen ? "Hide inspector" : "Show inspector"}
               </button>
             )}
             {zenMode && (
@@ -689,6 +817,7 @@ VITE_SUPABASE_ANON_KEY=...`}
                   node={selectedNode}
                   onUpdate={updateNodeData}
                   onAutofillStyleFromImage={autofillStyleFromImage}
+                  onAutofillFromConnectedRefine={autofillFromConnectedRefine}
                   autofilling={autofillingNodeId === selectedNode?.id}
                 />
               )}
@@ -742,11 +871,13 @@ function InspectorPanel({
   node,
   onUpdate,
   onAutofillStyleFromImage,
+  onAutofillFromConnectedRefine,
   autofilling,
 }: {
   node: Node<NodeData> | null;
   onUpdate: (updates: Partial<NodeData>) => void;
   onAutofillStyleFromImage: (styleNodeId: string) => void;
+  onAutofillFromConnectedRefine: (targetNodeId: string) => void;
   autofilling: boolean;
 }) {
   if (!node) {
@@ -807,8 +938,29 @@ function InspectorPanel({
           >
             {autofilling ? "Autofilling..." : "Autofill from connected image"}
           </button>
+          <button
+            onClick={() => onAutofillFromConnectedRefine(node.id)}
+            className="w-full px-3 py-2 text-sm bg-secondary text-secondary-foreground rounded hover:bg-secondary/90"
+          >
+            Autofill from connected refine
+          </button>
           <div className="text-[11px] text-muted-foreground">
             Connect an <span className="font-medium">Image Input (Upload)</span> node into this node, then click autofill.
+          </div>
+        </div>
+      )}
+
+      {type === "colorPalette" && (
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-muted-foreground">Refine</div>
+          <button
+            onClick={() => onAutofillFromConnectedRefine(node.id)}
+            className="w-full px-3 py-2 text-sm bg-secondary text-secondary-foreground rounded hover:bg-secondary/90"
+          >
+            Apply from connected refine
+          </button>
+          <div className="text-[11px] text-muted-foreground">
+            Connect a <span className="font-medium">Refine</span> node to this node to pull the latest refined palette.
           </div>
         </div>
       )}

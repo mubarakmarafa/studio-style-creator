@@ -127,7 +127,17 @@ export const CompilerNode = memo(function CompilerNode({ id, data, selected }: N
       )}
 
       {showJson && (
-        <pre className="mt-2 p-2 text-[11px] font-mono bg-muted rounded border overflow-auto flex-1 min-h-0 whitespace-pre-wrap break-words">
+        <pre
+          className="mt-2 p-2 text-[11px] font-mono bg-muted rounded border overflow-auto flex-1 min-h-0 whitespace-pre-wrap break-words"
+          onWheelCapture={(e) => {
+            // React Flow uses wheel events for pan/zoom (we have panOnScroll enabled).
+            // When this node is selected, prefer scrolling the JSON window if it's scrollable.
+            if (!selected) return;
+            const el = e.currentTarget;
+            if (el.scrollHeight <= el.clientHeight) return;
+            e.stopPropagation();
+          }}
+        >
           {json}
         </pre>
       )}
