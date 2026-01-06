@@ -109,13 +109,32 @@ async function handleStyleFromImage(
   const instruction =
     body?.instruction?.trim() ||
     [
-      "You are a style-extraction assistant.",
-      "Given the image, produce a repeatable style prompt template that can be reused with different subjects.",
-      'The style prompt MUST include a [subject] placeholder (exactly bracketed like that).',
-      "Focus on lighting, materials, rendering pipeline, composition rules, constraints (e.g., transparent alpha PNG, die-cut border).",
-      "Return ONLY valid JSON with this shape:",
+      "You are a style-extraction assistant for an image-generation 'Style Builder'.",
+      "Act like a thoughtful art critic: assess the image's visual language and artistic principles, not just a literal inventory of objects.",
+      "",
+      "Goal: produce a repeatable style template that can be reused with different subjects.",
+      "The description MUST include a [subject] placeholder (exactly bracketed).",
+      "",
+      "CRITICAL: Keep the description SUBJECT-AGNOSTIC.",
+      "- Do NOT mention what is depicted in the source image (no specific objects/people/animals/clothing).",
+      "- Do NOT use anatomy-specific terms (e.g., head, face, eyes, hair) or item-specific terms (e.g., glasses) unless universally applicable to any [subject].",
+      "- Express composition/framing generically using [subject] only (e.g., 'tight crop where [subject] dominates the frame').",
+      "",
+      "When writing the description, prioritize artistic qualities (some may be subjective):",
+      "- composition principles (focal point hierarchy, balance, rhythm, negative space, framing, depth cues)",
+      "- mood/atmosphere",
+      "- stylistic influences (movement/era references if plausible; hedge if unsure)",
+      "- color strategy (harmony/contrast, temperature, saturation, accent colors)",
+      "- mark-making/line character and edge handling",
+      "- surface/texture/material feel",
+      "- lighting intent and shadow/specular behavior",
+      "- camera/perspective choices",
+      "",
+      "Also include concrete constraints when present (background rules, transparent alpha PNG, sticker/die-cut border, medium/rendering pipeline).",
+      "Avoid: brand names/logos, artist-name imitation, overly literal scene narration.",
+      "",
+      "Return ONLY valid JSON (no markdown, no code fences) with this shape:",
       '{ "description": string }',
-      "No markdown, no code fences.",
     ].join("\n");
 
   if (!imageDataUrl) {
@@ -181,7 +200,7 @@ async function handleStyleFromImage(
 
 async function handleImage(
   req: Request,
-  body: { prompt?: string; model?: string; size?: string } | null,
+  body: { prompt?: string; model?: string; size?: string; quality?: "low" | "medium" | "high" } | null,
 ): Promise<Response> {
   if (!OPENAI_API_KEY) {
     return json(
@@ -193,6 +212,7 @@ async function handleImage(
   const prompt = body?.prompt?.trim();
   const model = body?.model?.trim() || "gpt-image-1";
   const size = body?.size?.trim() || "1024x1024";
+  const quality = body?.quality;
 
   if (!prompt) {
     return json(
@@ -214,6 +234,7 @@ async function handleImage(
       model,
       prompt,
       size,
+      ...(quality ? { quality } : {}),
     }),
   });
 

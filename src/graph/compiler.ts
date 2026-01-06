@@ -13,6 +13,7 @@ import type {
   BackgroundNodeData,
   OutputNodeData,
 } from "./schema";
+import { parseSubjectsText } from "@/graph/subjects";
 
 export interface CompileError {
   message: string;
@@ -22,6 +23,12 @@ export interface CompileError {
 export interface CompileResult {
   template: FFAStyleTemplate | null;
   errors: CompileError[];
+  /**
+   * If the upstream graph includes a Subject node in multiple mode, this is the
+   * parsed subject list (capped/normalized).
+   */
+  subjects?: string[];
+  subjectMode?: "single" | "multiple";
 }
 
 export type CompileMode = "fromTemplateRoot" | "upstreamOfTarget";
@@ -157,9 +164,12 @@ function nodeToPatch(node: Node<NodeData>): Record<string, unknown> | null {
 
     case "subject": {
       const d = data as SubjectNodeData;
+      const mode: "single" | "multiple" = (d.mode ?? "single") === "multiple" ? "multiple" : "single";
+      const subjects = mode === "multiple" ? parseSubjectsText(d.subjectsText ?? "") : [];
+      const subject = mode === "multiple" ? subjects[0] ?? "" : d.subject || "";
       return {
         object_specification: {
-          subject: d.subject || "",
+          subject,
         },
       };
     }
@@ -326,6 +336,23 @@ function normalizeTemplate(partial: Partial<FFAStyleTemplate>): FFAStyleTemplate
   return template as FFAStyleTemplate;
 }
 
+function computeSubjectsFromOrderedNodes(ordered: Node<NodeData>[]): {
+  subjectMode?: "single" | "multiple";
+  subjects?: string[];
+} {
+  // Use the *last* subject node by deterministic order (later nodes overwrite earlier).
+  for (let i = ordered.length - 1; i >= 0; i--) {
+    const n = ordered[i];
+    if (n?.type !== "subject") continue;
+    const d = (n.data ?? {}) as SubjectNodeData;
+    const mode: "single" | "multiple" = (d.mode ?? "single") === "multiple" ? "multiple" : "single";
+    if (mode !== "multiple") return { subjectMode: "single" };
+    const subjects = parseSubjectsText(d.subjectsText ?? "");
+    return { subjectMode: "multiple", subjects };
+  }
+  return {};
+}
+
 // Compile graph to FFAStyles JSON template
 export function compileGraph(
   nodes: Node<NodeData>[],
@@ -344,6 +371,7 @@ export function compileGraph(
 
   // Get connected nodes in order
   const connectedNodes = getConnectedNodes(root.id, nodes, edges);
+  const subjectsInfo = computeSubjectsFromOrderedNodes(connectedNodes);
 
   // Build template by merging patches
   let template: Partial<FFAStyleTemplate> = {};
@@ -358,6 +386,7 @@ export function compileGraph(
   return {
     template: normalizeTemplate(template),
     errors,
+    ...subjectsInfo,
   };
 }
 
@@ -377,6 +406,7 @@ export function compileUpstream(
     return {
       template: normalizeTemplate({}),
       errors: [{ message: "No inputs connected. Connect nodes into this Compiler/Generate node." }],
+      subjectMode: "single",
     };
   }
 
@@ -387,6 +417,7 @@ export function compileUpstream(
     if (pa !== pb) return pa - pb;
     return a.id.localeCompare(b.id);
   });
+  const subjectsInfo = computeSubjectsFromOrderedNodes(ordered);
 
   let template: Partial<FFAStyleTemplate> = {};
   for (const node of ordered) {
@@ -394,7 +425,7 @@ export function compileUpstream(
     if (patch) template = deepMerge(template, patch) as Partial<FFAStyleTemplate>;
   }
 
-  return { template: normalizeTemplate(template), errors };
+  return { template: normalizeTemplate(template), errors, ...subjectsInfo };
 }
 
 /**

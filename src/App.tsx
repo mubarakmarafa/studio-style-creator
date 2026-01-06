@@ -23,6 +23,7 @@ import type { HistoryEntry } from "./history/historyTypes";
 import { ENV_STATE } from "./env";
 import { cn } from "./lib/utils";
 import { proxyStyleFromImage } from "./openaiProxyClient";
+import { parseSubjectsCsv, parseSubjectsText } from "./graph/subjects";
 import {
   clearWorkspaceSnapshot,
   loadWorkspaceSnapshot,
@@ -38,7 +39,11 @@ export function App() {
   const [panelTab, setPanelTab] = useState<PanelTab>("generate");
   const [subject, setSubject] = useState("");
   const [generating, setGenerating] = useState(false);
-  const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+  const [generatedImages, setGeneratedImages] = useState<
+    Array<{ subject: string; image?: string; status: "queued" | "generating" | "ready" | "error" | "cancelled"; error?: string }>
+  >([]);
+  const abortRef = useRef<AbortController[]>([]);
+  const runRef = useRef<{ runId: string; stopped: boolean } | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(getHistory());
   const [autofillingNodeId, setAutofillingNodeId] = useState<string | null>(null);
   const [zenMode, setZenMode] = useState(false);
@@ -307,9 +312,32 @@ export function App() {
       try {
         const instruction = [
           "You are a style-extraction assistant for an image-generation 'Style Builder'.",
-          "Given the image, output a repeatable style description template that can be reused with different subjects.",
+          "Act like a thoughtful art critic: assess the image's visual language and artistic principles, not just a literal inventory of objects.",
+          "",
+          "Goal: produce a repeatable style template that can be reused with different subjects.",
           "The description MUST include a [subject] placeholder (exactly bracketed).",
-          "Prefer concrete constraints: renderer/tooling, lighting, materials, camera/perspective, background rules, output format, sticker/die-cut border if present.",
+          "",
+          "CRITICAL: Keep the description SUBJECT-AGNOSTIC.",
+          "- Do NOT mention what is depicted in the source image (no specific objects/people/animals/clothing).",
+          "- Do NOT use anatomy-specific terms (e.g., head, face, eyes, hair) or item-specific terms (e.g., glasses) unless they are universally applicable to any [subject].",
+          "- Express composition/framing generically using [subject] only (e.g., 'tight crop where [subject] dominates the frame').",
+          "",
+          "When writing the description, prioritize *artistic qualities* (some may be subjective):",
+          "- composition principles (focal point hierarchy, balance/symmetry/asymmetry, rhythm/repetition, negative space, framing/cropping, depth cues)",
+          "- mood/affect/atmosphere (tension vs calm, whimsical vs serious, etc.)",
+          "- stylistic influences (movement/era references if plausible; hedge if unsure: 'evokes', 'reminiscent of')",
+          "- color strategy (harmony/contrast, palette temperature, saturation, accent colors, gradients vs flats)",
+          "- mark-making/line character (gesture, line weight, edge softness, contour vs sketch)",
+          "- surface/texture/material feel (grain, paper texture, paint, plastic, metal, fabric, etc.)",
+          "- lighting intent (dramatic vs diffuse, rim light, bounce, shadow hardness, specular behavior)",
+          "- camera/perspective choices (lens feel, angle, isometric/orthographic cues)",
+          "",
+          "Also include concrete constraints when present:",
+          "- renderer/tooling or medium (3D render, vector, watercolor, ink, collage, etc.)",
+          "- background rules",
+          "- output format (e.g., transparent alpha PNG) and sticker/die-cut border if present",
+          "",
+          "Avoid: brand names/logos, artist-name imitation, and overly literal scene narration.",
           "",
           "Return ONLY valid JSON (no markdown, no code fences) with this shape:",
           "{",
@@ -326,7 +354,7 @@ export function App() {
           "}",
           "",
           "Example of the kind of description to write:",
-          "Generate a [subject] as a 3D object rendered in Blender or Octane. The design should feature realistic lighting and dimensional shading, and it must be exported as a transparent alpha PNG (no background, no gradients, no checkerboards). Apply a white die-cut border around the object for a sticker-style appearance. Follow this style:",
+          "Generate a [subject] with playful, collectible-sticker energy: clean silhouette, strong focal hierarchy, generous negative space, and satisfying material reads. Render as a polished 3D object (studio-grade, soft-but-defined shadows, subtle rim light, pleasing specular highlights), with crisp edges and a slightly exaggerated toy-like proportion. Keep the background fully transparent (alpha PNG: no background, no gradients, no checkerboards). Add a white die-cut border for sticker presentation. Use a cohesive, slightly saturated palette with one accent color guiding attention. Follow this style:",
         ].join("\n");
 
         const resp = await proxyStyleFromImage(imageDataUrl, {
@@ -500,46 +528,98 @@ export function App() {
   );
 
   // Generate image
-  const handleGenerate = useCallback(async () => {
+  const handleGenerate = useCallback(async (opts?: { qualityPreset?: "fast" | "balanced" | "high"; concurrency?: number }) => {
     if (!compileResult.template) return;
     if (!ENV_STATE.ok) {
       alert("Missing Supabase configuration. Check your .env.local file.");
       return;
     }
 
-    const effectiveSubject =
-      subject.trim().length > 0 ? subject.trim() : compileResult.template.object_specification.subject || "";
-    if (!effectiveSubject.trim()) return;
+    const upstreamSubjects = (compileResult as any).subjects as string[] | undefined;
+    const subjects =
+      Array.isArray(upstreamSubjects) && upstreamSubjects.length > 1
+        ? upstreamSubjects
+        : [
+            (subject.trim().length > 0 ? subject.trim() : compileResult.template.object_specification.subject || "").trim(),
+          ].filter(Boolean);
+    if (subjects.length === 0) return;
+
+    const qualityPreset = (opts?.qualityPreset ?? "balanced") as "fast" | "balanced" | "high";
+    const size = "1024x1024";
+    const quality: "low" | "medium" | "high" =
+      qualityPreset === "fast" ? "low" : qualityPreset === "high" ? "high" : "medium";
+    const concurrency = Math.max(1, Math.min(4, Number.isFinite(opts?.concurrency as any) ? Number(opts?.concurrency) : 2));
+
+    // Reset previous run.
+    abortRef.current.forEach((c) => c.abort());
+    abortRef.current = [];
+    const runId = crypto.randomUUID();
+    runRef.current = { runId, stopped: false };
+    setGeneratedImages(subjects.map((s) => ({ subject: s, status: "queued" as const })));
 
     setGenerating(true);
     try {
-      const finalPrompt = generateJsonPrompt(compileResult.template, effectiveSubject);
-      const result = await generateImage(finalPrompt, {
-        model: "gpt-image-1",
-        size: compileResult.template.output?.canvas_ratio === "1:1" ? "1024x1024" : "1024x1024",
-      });
+      let nextIndex = 0;
+      const worker = async () => {
+        while (nextIndex < subjects.length) {
+          const ctl = runRef.current;
+          if (!ctl || ctl.runId !== runId || ctl.stopped) break;
+          const i = nextIndex++;
+          const subj = subjects[i]!;
 
-      const dataUrl = `data:${result.contentType};base64,${result.base64}`;
-      setGeneratedImage(dataUrl);
+          setGeneratedImages((prev) =>
+            prev.map((it) => (it.subject === subj ? { ...it, status: "generating" as const } : it)),
+          );
 
-      // Save to history
-      const entry = saveHistoryEntry({
-        subject: effectiveSubject,
-        compiledJson: compileResult.template,
-        finalPrompt,
-        generationParams: {
-          model: "gpt-image-1",
-          size: "1024x1024",
-        },
-        image: dataUrl,
-      });
-      setHistory((h) => [entry, ...h]);
-    } catch (e) {
-      alert(`Failed to generate image: ${e instanceof Error ? e.message : String(e)}`);
+          const controller = new AbortController();
+          abortRef.current.push(controller);
+          try {
+            const finalPrompt = generateJsonPrompt(compileResult.template!, subj);
+            const result = await generateImage(finalPrompt, {
+              model: "gpt-image-1",
+              size,
+              quality,
+              signal: controller.signal,
+            });
+            const dataUrl = `data:${result.contentType};base64,${result.base64}`;
+
+            setGeneratedImages((prev) =>
+              prev.map((it) => (it.subject === subj ? { ...it, status: "ready" as const, image: dataUrl } : it)),
+            );
+
+            // Save to history (one entry per image)
+            const entry = saveHistoryEntry({
+              subject: subj,
+              compiledJson: compileResult.template!,
+              finalPrompt,
+              generationParams: { model: "gpt-image-1", size },
+              image: dataUrl,
+            });
+            setHistory((h) => [entry, ...h]);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            const cancelled = msg.toLowerCase().includes("aborted");
+            setGeneratedImages((prev) =>
+              prev.map((it) =>
+                it.subject === subj
+                  ? { ...it, status: cancelled ? ("cancelled" as const) : ("error" as const), error: cancelled ? undefined : msg }
+                  : it,
+              ),
+            );
+            if (!cancelled) {
+              // keep the old UX: surface an alert for real errors
+              // (but still allow others to finish)
+              console.warn("[GeneratePanel] image failed:", msg);
+            }
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(concurrency, subjects.length) }, () => worker()));
     } finally {
       setGenerating(false);
     }
-  }, [compileResult.template, subject]);
+  }, [compileResult, subject]);
 
   // Add generated image to canvas
   const addImageToCanvas = useCallback(
@@ -700,7 +780,7 @@ VITE_SUPABASE_ANON_KEY=...`}
                   clearWorkspaceSnapshot();
                   setSelectedNode(null);
                   setPanelTab("generate");
-                  setGeneratedImage(null);
+                  setGeneratedImages([]);
                   setSubject("");
                   setEdges([]);
                   setNodes([]);
@@ -829,21 +909,30 @@ VITE_SUPABASE_ANON_KEY=...`}
                   onSubjectChange={setSubject}
                   onGenerate={handleGenerate}
                   generating={generating}
-                  generatedImage={generatedImage}
+                  generatedImages={generatedImages}
+                  onStop={() => {
+                    const ctl = runRef.current;
+                    if (ctl) ctl.stopped = true;
+                    abortRef.current.forEach((c) => c.abort());
+                    abortRef.current = [];
+                    setGeneratedImages((prev) =>
+                      prev.map((it) => (it.status === "ready" ? it : { ...it, status: "cancelled" as const })),
+                    );
+                    setGenerating(false);
+                  }}
                   onAddToCanvas={() => {
-                    if (generatedImage && compileResult.template) {
-                      const effectiveSubject =
-                        subject.trim().length > 0
-                          ? subject.trim()
-                          : compileResult.template.object_specification.subject || "";
+                    const ready = generatedImages.filter((it) => it.status === "ready" && it.image);
+                    if (ready.length === 0 || !compileResult.template) return;
+                    // Add all ready images to canvas.
+                    for (const it of ready) {
                       const entry: HistoryEntry = {
                         id: crypto.randomUUID(),
                         timestamp: Date.now(),
-                        subject: effectiveSubject,
+                        subject: it.subject,
                         compiledJson: compileResult.template,
-                        finalPrompt: generateJsonPrompt(compileResult.template, effectiveSubject),
+                        finalPrompt: generateJsonPrompt(compileResult.template, it.subject),
                         generationParams: { model: "gpt-image-1", size: "1024x1024" },
-                        image: generatedImage,
+                        image: it.image!,
                       };
                       addImageToCanvas(entry);
                     }
@@ -918,13 +1007,75 @@ function InspectorPanel({
       {type === "subject" && (
         <div>
           <label className="text-xs font-semibold text-muted-foreground">Subject</label>
-          <input
-            type="text"
-            value={(data as any).subject || ""}
-            onChange={(e) => onUpdate({ subject: e.target.value })}
-            className="w-full mt-1 px-2 py-1 text-sm border rounded bg-background"
-            placeholder="e.g., retro robot vacuum"
-          />
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              className={cn(
+                "px-2 py-1 text-xs border rounded",
+                ((data as any).mode ?? "single") !== "multiple" ? "bg-accent" : "hover:bg-accent",
+              )}
+              onClick={() => onUpdate({ mode: "single" } as any)}
+            >
+              Single
+            </button>
+            <button
+              className={cn(
+                "px-2 py-1 text-xs border rounded",
+                ((data as any).mode ?? "single") === "multiple" ? "bg-accent" : "hover:bg-accent",
+              )}
+              onClick={() => onUpdate({ mode: "multiple" } as any)}
+            >
+              Multiple
+            </button>
+          </div>
+
+          {((data as any).mode ?? "single") === "multiple" ? (
+            <div className="mt-2 space-y-2">
+              <textarea
+                value={(data as any).subjectsText || ""}
+                onChange={(e) => onUpdate({ subjectsText: e.target.value } as any)}
+                className="w-full px-2 py-1 text-sm border rounded bg-background"
+                rows={4}
+                placeholder={"Multiple subjects (comma or newline separated)\ncat, dog\nhamster"}
+              />
+
+              <div className="flex items-center gap-2">
+                <label className="text-xs px-2 py-1 border rounded cursor-pointer hover:bg-accent">
+                  Upload CSV
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const text = await file.text();
+                      const subjects = parseSubjectsCsv(text);
+                      onUpdate({ subjectsText: subjects.join("\n"), csvFilename: file.name, mode: "multiple" } as any);
+                      e.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+                <div className="text-[11px] text-muted-foreground truncate">
+                  {typeof (data as any).csvFilename === "string" && (data as any).csvFilename
+                    ? `CSV: ${(data as any).csvFilename}`
+                    : "First column used"}
+                </div>
+              </div>
+
+              <div className="text-[11px] text-muted-foreground">
+                Count:{" "}
+                <span className="font-medium">{parseSubjectsText((data as any).subjectsText || "").length}</span>
+              </div>
+            </div>
+          ) : (
+            <input
+              type="text"
+              value={(data as any).subject || ""}
+              onChange={(e) => onUpdate({ subject: e.target.value })}
+              className="w-full mt-2 px-2 py-1 text-sm border rounded bg-background"
+              placeholder="e.g., retro robot vacuum"
+            />
+          )}
         </div>
       )}
 
@@ -1019,19 +1170,29 @@ function GeneratePanel({
   onSubjectChange,
   onGenerate,
   generating,
-  generatedImage,
+  generatedImages,
+  onStop,
   onAddToCanvas,
 }: {
   compileResult: ReturnType<typeof compileGraph>;
   subject: string;
   onSubjectChange: (s: string) => void;
-  onGenerate: () => void;
+  onGenerate: (opts?: { qualityPreset?: "fast" | "balanced" | "high"; concurrency?: number }) => void;
   generating: boolean;
-  generatedImage: string | null;
+  generatedImages: Array<{
+    subject: string;
+    image?: string;
+    status: "queued" | "generating" | "ready" | "error" | "cancelled";
+    error?: string;
+  }>;
+  onStop: () => void;
   onAddToCanvas: () => void;
 }) {
+  const [qualityPreset, setQualityPreset] = useState<"fast" | "balanced" | "high">("balanced");
+  const [concurrency, setConcurrency] = useState<number>(2);
   const effectiveSubject =
     subject.trim().length > 0 ? subject.trim() : compileResult.template?.object_specification?.subject || "";
+  const isMulti = Array.isArray((compileResult as any).subjects) && ((compileResult as any).subjects as string[]).length > 1;
   return (
     <div className="space-y-4">
       <div>
@@ -1045,6 +1206,39 @@ function GeneratePanel({
           placeholder="e.g., retro robot vacuum"
           className="w-full px-2 py-1 text-sm border rounded bg-background"
         />
+        {isMulti && (
+          <div className="text-[11px] text-muted-foreground mt-1">
+            Multi-subject detected from Subject node — this override will be ignored unless you disconnect it.
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="text-xs font-semibold text-muted-foreground mb-1 block">Quality</label>
+          <select
+            value={qualityPreset}
+            onChange={(e) => setQualityPreset(e.target.value as any)}
+            className="w-full px-2 py-1 text-sm border rounded bg-background"
+          >
+            <option value="fast">Fast (quality: low)</option>
+            <option value="balanced">Balanced (quality: medium)</option>
+            <option value="high">High (quality: high)</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-muted-foreground mb-1 block">Parallel</label>
+          <select
+            value={String(concurrency)}
+            onChange={(e) => setConcurrency(Number(e.target.value))}
+            className="w-full px-2 py-1 text-sm border rounded bg-background"
+          >
+            <option value="1">1×</option>
+            <option value="2">2×</option>
+            <option value="3">3×</option>
+            <option value="4">4×</option>
+          </select>
+        </div>
       </div>
 
       {compileResult.errors.length > 0 && (
@@ -1080,32 +1274,47 @@ function GeneratePanel({
       )}
 
       <button
-        onClick={onGenerate}
-        disabled={!compileResult.template || !effectiveSubject.trim() || generating}
+        onClick={() => onGenerate({ qualityPreset, concurrency })}
+        disabled={!compileResult.template || (!effectiveSubject.trim() && !isMulti) || generating}
         className="w-full px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {generating ? "Generating..." : "Generate Image"}
       </button>
 
-      {generating && !generatedImage && (
-        <div className="space-y-2">
-          <div className="w-full aspect-square rounded border bg-muted/40 flex items-center justify-center">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <div className="h-4 w-4 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
-              Generating…
-            </div>
-          </div>
-        </div>
+      {generating && (
+        <button
+          onClick={onStop}
+          className="w-full px-4 py-2 border rounded hover:bg-accent text-sm"
+        >
+          Stop
+        </button>
       )}
 
-      {generatedImage && (
+      {generatedImages.length > 0 && (
         <div className="space-y-2">
-          <img src={generatedImage} alt="Generated" className="w-full rounded border" />
+          <div className="grid grid-cols-2 gap-2">
+            {generatedImages.map((it) => (
+              <div key={it.subject} className="border rounded overflow-hidden bg-background">
+                {it.status === "ready" && it.image ? (
+                  <img src={it.image} alt={it.subject} className="w-full object-cover" />
+                ) : (
+                  <div className="w-full aspect-square bg-muted/40 flex items-center justify-center">
+                    <div className="text-xs text-muted-foreground">
+                      {it.status === "generating" ? "Generating…" : it.status}
+                    </div>
+                  </div>
+                )}
+                <div className="px-2 py-1 text-[11px] border-t truncate" title={it.subject}>
+                  {it.subject}
+                </div>
+              </div>
+            ))}
+          </div>
           <button
             onClick={onAddToCanvas}
             className="w-full px-4 py-2 bg-secondary text-secondary-foreground rounded hover:bg-secondary/90 text-sm"
           >
-            Add to Canvas
+            Add all ready to Canvas
           </button>
         </div>
       )}

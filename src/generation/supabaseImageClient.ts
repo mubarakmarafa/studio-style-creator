@@ -6,6 +6,11 @@ type ImageGenerationResponse = {
   raw?: unknown;
 };
 
+function truncate(s: string, max = 1200) {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max)}\n…(truncated, total ${s.length} chars)`;
+}
+
 function functionsBaseUrl(): string {
   if (!ENV_STATE.ok) {
     throw new Error(ENV_STATE.message ?? "Missing required Vite env vars.");
@@ -23,7 +28,7 @@ function functionsBaseUrl(): string {
 
 export async function generateImage(
   prompt: string,
-  opts?: { model?: string; size?: string; signal?: AbortSignal }
+  opts?: { model?: string; size?: string; quality?: "low" | "medium" | "high"; signal?: AbortSignal }
 ): Promise<ImageGenerationResponse> {
   const url = `${functionsBaseUrl()}/openai-proxy/image`;
   const res = await fetch(url, {
@@ -37,6 +42,7 @@ export async function generateImage(
       prompt,
       model: opts?.model || "gpt-image-1",
       size: opts?.size || "1024x1024",
+      quality: opts?.quality,
     }),
     signal: opts?.signal,
   });
@@ -53,13 +59,17 @@ export async function generateImage(
           parsed?.error_description ??
           parsed?.message ??
           parsed?.error ??
+          // Supabase edge function wraps OpenAI errors as `{ upstream: {...} }`
+          parsed?.upstream?.error?.message ??
+          parsed?.upstream?.message ??
           undefined;
       } catch {
         // ignore
       }
     }
+    const rawHint = raw ? `\nBody:\n${truncate(raw)}` : "";
     throw new Error(
-      `Image generation failed ${res.status} (${contentType})${detail ? `: ${detail}` : ""}`
+      `Image generation failed ${res.status} (${contentType})${detail ? `: ${detail}` : ""}${rawHint}`
     );
   }
 

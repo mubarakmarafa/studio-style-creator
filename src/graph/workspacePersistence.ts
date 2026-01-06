@@ -34,12 +34,38 @@ function stripLargeImages(nodes: Node<NodeData>[]): Node<NodeData>[] {
   return nodes.map((n) => {
     const data: any = n.data;
     const image: unknown = data?.image;
-    if (typeof image !== "string") return n;
+    const images: unknown = data?.images;
 
-    const shouldStrip = image.startsWith("data:") && image.length > MAX_DATA_URL_CHARS;
-    if (!shouldStrip) return n;
+    let nextData = data;
+    let changed = false;
 
-    return { ...n, data: { ...(n.data as any), image: "" } };
+    if (typeof image === "string") {
+      const shouldStrip = image.startsWith("data:") && image.length > MAX_DATA_URL_CHARS;
+      if (shouldStrip) {
+        nextData = { ...nextData, image: "" };
+        changed = true;
+      }
+    }
+
+    // Also strip large images inside GenerateNode's `images[]` grid (multi-subject runs).
+    if (Array.isArray(images)) {
+      const nextImages = images.map((it: any) => {
+        const img = it?.image;
+        if (typeof img === "string" && img.startsWith("data:") && img.length > MAX_DATA_URL_CHARS) {
+          return { ...it, image: "" };
+        }
+        return it;
+      });
+      // Only assign if something actually changed (keeps references stable).
+      const anyChanged = nextImages.some((it: any, idx: number) => it !== images[idx]);
+      if (anyChanged) {
+        nextData = { ...nextData, images: nextImages };
+        changed = true;
+      }
+    }
+
+    if (!changed) return n;
+    return { ...n, data: nextData };
   });
 }
 

@@ -77,6 +77,24 @@ export interface TemplateRootNodeData extends BaseNodeData {
 export interface SubjectNodeData extends BaseNodeData {
   subject: string;
   constraints?: string;
+  /**
+   * Subject entry mode.
+   * - single: use `subject`
+   * - multiple: use `subjectsText` (comma/newline) or `subjects` (optional cached list)
+   */
+  mode?: "single" | "multiple";
+  /**
+   * Raw multi-subject input. Parsed by compiler/generators.
+   */
+  subjectsText?: string;
+  /**
+   * Optional cached list of subjects (not required; compiler can parse from subjectsText).
+   */
+  subjects?: string[];
+  /**
+   * Optional UI hint: last uploaded CSV filename.
+   */
+  csvFilename?: string;
 }
 
 // Style Description Node (freeform style text)
@@ -194,6 +212,27 @@ export interface GenerateNodeData extends BaseNodeData {
   lastGeneratedAt?: number;
   model?: string;
   size?: string;
+  /**
+   * UI-only: quick presets for speed/quality (maps to `size`).
+   */
+  qualityPreset?: "fast" | "balanced" | "high";
+  /**
+   * UI-only: concurrency for multi-generation runs.
+   */
+  concurrency?: number;
+  /**
+   * Multi-generation output grid.
+   */
+  images?: Array<{
+    subject: string;
+    image?: string;
+    status: "queued" | "generating" | "ready" | "error" | "cancelled";
+    error?: string;
+  }>;
+  /**
+   * UI-only: guard against late async updates overwriting newer runs.
+   */
+  lastRunId?: string;
 }
 
 // Refine Node (creates a new downstream branch using LLM feedback + images)

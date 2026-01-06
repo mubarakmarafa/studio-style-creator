@@ -6,12 +6,13 @@ import { GenerateNode } from "./GenerateNode";
 import { ImageInputNode } from "./ImageInputNode";
 import { ImageNode } from "./ImageNode";
 import { RefineNode } from "./RefineNode";
+import { SubjectNode } from "./SubjectNode";
 import type { NodeTypes } from "@xyflow/react";
 
 export const nodeTypes: NodeTypes = {
   default: BaseNode as any,
   templateRoot: BaseNode as any,
-  subject: BaseNode as any,
+  subject: SubjectNode as any,
   styleDescription: BaseNode as any,
   lineQuality: BaseNode as any,
   colorPalette: ColorPaletteNode as any,
