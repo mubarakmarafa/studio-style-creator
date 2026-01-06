@@ -59,7 +59,8 @@ export type NodeType =
   | "compiler"
   | "generate"
   | "imageInput"
-  | "imageNode";
+  | "imageNode"
+  | "refine";
 
 // Base node data structure
 export interface BaseNodeData {
@@ -114,8 +115,24 @@ export interface FillAndTextureNodeData extends BaseNodeData {
 }
 
 export interface BackgroundNodeData extends BaseNodeData {
+  /**
+   * Background mode. Kept as `type` to match existing compiler/autofill wiring.
+   * Recommended values (used by the Background node UI):
+   * - "scene"
+   * - "solidColor"
+   * - "dieCutStickerOutline"
+   * - "transparent"
+   */
   type: string;
   style?: string;
+  /**
+   * Optional solid background color (hex string).
+   */
+  color?: string;
+  /**
+   * Optional die-cut outline width in pixels (for sticker-style output).
+   */
+  outlineWidthPx?: number;
   [key: string]: unknown;
 }
 
@@ -144,6 +161,10 @@ export interface ImageNodeData extends BaseNodeData {
     size: string;
   };
   timestamp: number;
+  /**
+   * UI-only (optional): allows showing a canvas placeholder while an image is being generated.
+   */
+  status?: "generating" | "ready" | "error";
 }
 
 // Compiler Node (compiles upstream nodes to JSON)
@@ -175,6 +196,43 @@ export interface GenerateNodeData extends BaseNodeData {
   size?: string;
 }
 
+// Refine Node (creates a new downstream branch using LLM feedback + images)
+export interface RefineNodeData extends BaseNodeData {
+  /**
+   * User feedback about what to improve.
+   */
+  feedback: string;
+  /**
+   * Optional explicit selection for which node provides the "source" image.
+   * If omitted, Refine will try to infer from connected nodes.
+   */
+  sourceImageNodeId?: string;
+  /**
+   * Optional explicit selection for which node provides the "generated" image.
+   * If omitted, Refine will try to infer from connected nodes.
+   */
+  generatedImageNodeId?: string;
+  /**
+   * LLM model used for refinement (multimodal).
+   */
+  model?: string;
+  /**
+   * Persisted last refinement result (non-destructive; used for UI preview).
+   */
+  lastResult?: {
+    improvedTemplate: FFAStyleTemplate;
+    /**
+     * Optional, extra guidance for updating node fields. Keys are node types or semantic groups.
+     */
+    nodeFieldEdits: Record<string, unknown>;
+    notes?: string;
+    createdNodeIds?: string[];
+    createdEdgeIds?: string[];
+  };
+  lastError?: string;
+  lastRefinedAt?: number;
+}
+
 // Union type for all node data
 export type NodeData =
   | TemplateRootNodeData
@@ -190,7 +248,8 @@ export type NodeData =
   | CompilerNodeData
   | GenerateNodeData
   | ImageInputNodeData
-  | ImageNodeData;
+  | ImageNodeData
+  | RefineNodeData;
 
 // Graph document structure
 export interface GraphDocument {

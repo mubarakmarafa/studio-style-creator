@@ -277,6 +277,160 @@ async function handleImage(
   );
 }
 
+async function handleRefinePrompt(
+  req: Request,
+  body: {
+    originalPromptJson?: string;
+    compiledTemplate?: unknown;
+    upstreamNodes?: unknown;
+    feedback?: string;
+    sourceImageDataUrl?: string;
+    generatedImageDataUrl?: string;
+    model?: string;
+  } | null,
+): Promise<Response> {
+  if (!OPENAI_API_KEY) {
+    return json(
+      { error: "Missing OPENAI_API_KEY (set as a Supabase secret)" },
+      { status: 500, headers: corsHeaders(req) },
+    );
+  }
+
+  const model = body?.model?.trim() || "gpt-5.2";
+  const feedback = body?.feedback?.trim() || "";
+  const originalPromptJson = body?.originalPromptJson?.trim() || "";
+
+  if (!feedback) {
+    return json(
+      { error: "Missing feedback" },
+      { status: 400, headers: corsHeaders(req) },
+    );
+  }
+  if (!originalPromptJson) {
+    return json(
+      { error: "Missing originalPromptJson" },
+      { status: 400, headers: corsHeaders(req) },
+    );
+  }
+
+  const sourceImageDataUrl = body?.sourceImageDataUrl?.trim();
+  const generatedImageDataUrl = body?.generatedImageDataUrl?.trim();
+  if (sourceImageDataUrl && !sourceImageDataUrl.startsWith("data:image/")) {
+    return json(
+      { error: "sourceImageDataUrl must be a data URL starting with data:image/..." },
+      { status: 400, headers: corsHeaders(req) },
+    );
+  }
+  if (generatedImageDataUrl && !generatedImageDataUrl.startsWith("data:image/")) {
+    return json(
+      { error: "generatedImageDataUrl must be a data URL starting with data:image/..." },
+      { status: 400, headers: corsHeaders(req) },
+    );
+  }
+
+  const compiledTemplate = body?.compiledTemplate ?? null;
+  const upstreamNodes = body?.upstreamNodes ?? null;
+
+  const instruction = [
+    "You are a refinement assistant for an image-generation graph editor ('Style Builder').",
+    "You will receive:",
+    "- The ORIGINAL prompt JSON used for image generation (stringified JSON).",
+    "- The current compiled template object (already parsed).",
+    "- A list of upstream nodes (type/label/data) when available.",
+    "- The SOURCE reference image (optional).",
+    "- The GENERATED image we want to improve (optional).",
+    "- The user's feedback (required).",
+    "",
+    "Your task: produce an improved prompt/template for the next run that addresses the user's feedback while preserving what already works.",
+    "IMPORTANT RULES:",
+    "- Return ONLY valid JSON. No markdown. No code fences. No extra keys outside the schema.",
+    "- Do not include the base64 image data in your output.",
+    "- Keep the JSON compact and consistent (strings where strings are expected).",
+    "",
+    "Return JSON with this schema:",
+    "{",
+    '  "improvedTemplate": object,',
+    '  "nodeFieldEdits": object,',
+    '  "notes": string',
+    "}",
+    "",
+    "Where:",
+    "- improvedTemplate is the full improved version of the compiled template object.",
+    "- nodeFieldEdits is OPTIONAL guidance for updating node fields in a graph, keyed by node type.",
+    "  Example:",
+    "  {",
+    '    "subject": { "subject": \"...\" },',
+    '    "styleDescription": { "description": \"...\" },',
+    '    "colorPalette": { \"range\": \"...\", \"hexes\": [\"#...\"] },',
+    '    "output": { \"format\": \"PNG\", \"canvas_ratio\": \"1:1\" }',
+    "  }",
+    "",
+    "Context:",
+    `User feedback:\n${feedback}`,
+    "",
+    "ORIGINAL_PROMPT_JSON:",
+    originalPromptJson,
+    "",
+    "COMPILED_TEMPLATE_OBJECT (JSON):",
+    JSON.stringify(compiledTemplate),
+    "",
+    "UPSTREAM_NODES (JSON, may be null):",
+    JSON.stringify(upstreamNodes),
+  ].join("\n");
+
+  const content: any[] = [{ type: "input_text", text: instruction }];
+  if (sourceImageDataUrl) {
+    content.push({ type: "input_image", image_url: sourceImageDataUrl });
+  }
+  if (generatedImageDataUrl) {
+    content.push({ type: "input_image", image_url: generatedImageDataUrl });
+  }
+
+  const upstream = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      input: [
+        {
+          role: "user",
+          content,
+        },
+      ],
+    }),
+  });
+
+  const rawText = await upstream.text();
+  if (!upstream.ok) {
+    let parsed: unknown = undefined;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      // ignore
+    }
+    return json(
+      {
+        error: "OpenAI request failed",
+        upstream_status: upstream.status,
+        upstream: parsed ?? rawText,
+      },
+      { status: upstream.status, headers: corsHeaders(req) },
+    );
+  }
+
+  const raw = JSON.parse(rawText) as any;
+  const text =
+    raw?.output_text ??
+    raw?.output?.[0]?.content?.[0]?.text ??
+    raw?.output?.[0]?.content?.[0]?.value ??
+    "";
+
+  return json({ text, raw }, { headers: corsHeaders(req) });
+}
+
 Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
   const path = url.pathname.replace(/\/+$/, "");
@@ -306,11 +460,15 @@ Deno.serve(async (req: Request) => {
     if (action === "styleFromImage" || action === "style-from-image") {
       return await handleStyleFromImage(req, body);
     }
+    if (action === "refinePrompt" || action === "refine-prompt") {
+      return await handleRefinePrompt(req, body);
+    }
     return json(
       {
         error: "Missing or invalid action",
         expected: { action: "chat" } as const,
         or: { action: "image" } as const,
+        also: { action: "refinePrompt" } as const,
       },
       { status: 400, headers: corsHeaders(req) },
     );

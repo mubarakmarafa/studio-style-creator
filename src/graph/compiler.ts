@@ -180,7 +180,7 @@ function nodeToPatch(node: Node<NodeData>): Record<string, unknown> | null {
           line_quality: {
             type: d.type || "",
             ...Object.fromEntries(
-              Object.entries(d).filter(([k]) => k !== "label" && k !== "type")
+              Object.entries(d).filter(([k]) => k !== "label" && k !== "type" && k !== "ui")
             ),
           },
         },
@@ -194,7 +194,7 @@ function nodeToPatch(node: Node<NodeData>): Record<string, unknown> | null {
           color_palette: {
             range: d.range || "",
             ...Object.fromEntries(
-              Object.entries(d).filter(([k]) => k !== "label" && k !== "range")
+              Object.entries(d).filter(([k]) => k !== "label" && k !== "range" && k !== "ui")
             ),
           },
         },
@@ -208,7 +208,7 @@ function nodeToPatch(node: Node<NodeData>): Record<string, unknown> | null {
           lighting: {
             type: d.type || "",
             ...Object.fromEntries(
-              Object.entries(d).filter(([k]) => k !== "label" && k !== "type")
+              Object.entries(d).filter(([k]) => k !== "label" && k !== "type" && k !== "ui")
             ),
           },
         },
@@ -231,7 +231,7 @@ function nodeToPatch(node: Node<NodeData>): Record<string, unknown> | null {
           fill_and_texture: {
             filled_areas: d.filled_areas || "",
             ...Object.fromEntries(
-              Object.entries(d).filter(([k]) => k !== "label" && k !== "filled_areas")
+              Object.entries(d).filter(([k]) => k !== "label" && k !== "filled_areas" && k !== "ui")
             ),
           },
         },
@@ -240,14 +240,41 @@ function nodeToPatch(node: Node<NodeData>): Record<string, unknown> | null {
 
     case "background": {
       const d = data as BackgroundNodeData;
+      const mode = (d.type || "").trim();
+
+      // Build a minimal, semantically meaningful background block.
+      // We intentionally do NOT spread arbitrary node data into the template because nodes
+      // can contain editor-only fields (like `ui`) or stale fields from previous modes.
+      const background: Record<string, unknown> = {
+        type: mode,
+        ...(d.style ? { style: d.style } : {}),
+      };
+
+      if (mode === "solidColor") {
+        if (typeof d.color === "string" && d.color.trim().length > 0) {
+          background.color = d.color.trim();
+        }
+        // Clear other mode-specific fields so upstream values don't "stick" via deepMerge.
+        background.outlineWidthPx = undefined;
+      } else if (mode === "dieCutStickerOutline") {
+        if (typeof d.outlineWidthPx === "number" && Number.isFinite(d.outlineWidthPx)) {
+          background.outlineWidthPx = d.outlineWidthPx;
+        }
+        // Clear other mode-specific fields so upstream values don't "stick" via deepMerge.
+        background.color = undefined;
+      } else {
+        // transparent / scene (or any future modes that don't use these fields)
+        // Explicitly clear so earlier nodes can't leak mode-specific values forward.
+        background.color = undefined;
+        background.outlineWidthPx = undefined;
+      }
+
+      // Back-compat: if other non-UI keys are present, ignore them unless they are
+      // explicitly part of the background spec. (Prevents accidental leakage.)
       return {
         drawing_style: {
           background: {
-            type: d.type || "",
-            ...(d.style ? { style: d.style } : {}),
-            ...Object.fromEntries(
-              Object.entries(d).filter(([k]) => k !== "label" && k !== "type" && k !== "style")
-            ),
+            ...background,
           },
         },
       };
@@ -260,7 +287,9 @@ function nodeToPatch(node: Node<NodeData>): Record<string, unknown> | null {
           format: d.format || "PNG",
           canvas_ratio: d.canvas_ratio || "1:1",
           ...Object.fromEntries(
-            Object.entries(d).filter(([k]) => k !== "label" && k !== "format" && k !== "canvas_ratio")
+            Object.entries(d).filter(
+              ([k]) => k !== "label" && k !== "format" && k !== "canvas_ratio" && k !== "ui",
+            )
           ),
         },
       };

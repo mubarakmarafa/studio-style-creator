@@ -149,15 +149,24 @@ export const GenerateNode = memo(function GenerateNode({ id, data, selected }: N
           {generating ? "Generating..." : "Generate"}
         </button>
 
-        {d.image && (
+        {(generating || d.image) && (
           <div className="space-y-2">
             <div className="rounded border overflow-hidden bg-background">
-              <img
-                src={d.image}
-                alt={subject || "Generated"}
-                className="w-full object-contain"
-                style={ui.height ? { maxHeight: "100%" } : { maxHeight: 260 }}
-              />
+              {generating && !d.image ? (
+                <div className="w-full aspect-square flex items-center justify-center bg-muted/40">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <div className="h-4 w-4 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
+                    Generating…
+                  </div>
+                </div>
+              ) : (
+                <img
+                  src={d.image}
+                  alt={subject || "Generated"}
+                  className="w-full object-contain"
+                  style={ui.height ? { maxHeight: "100%" } : { maxHeight: 260 }}
+                />
+              )}
             </div>
             <div className="flex gap-2">
               <button

@@ -4,9 +4,11 @@ import {
   Background,
   Controls,
   MiniMap,
+  SelectionMode,
   addEdge,
   useNodesState,
   useEdgesState,
+  type ReactFlowInstance,
   type Connection,
   type Edge,
   type Node,
@@ -39,7 +41,12 @@ export function App() {
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(getHistory());
   const [autofillingNodeId, setAutofillingNodeId] = useState<string | null>(null);
+  const [zenMode, setZenMode] = useState(false);
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const lastSavedRef = useRef<string>("");
+  const reactFlowWrapperRef = useRef<HTMLDivElement | null>(null);
+  const reactFlowInstanceRef = useRef<ReactFlowInstance<Node<NodeData>, Edge> | null>(null);
+  const spawnIndexRef = useRef(0);
 
   // Rehydrate workspace from local storage once on mount.
   useEffect(() => {
@@ -119,22 +126,44 @@ export function App() {
     [setEdges]
   );
 
+  const getViewportCenterFlowPosition = useCallback(() => {
+    const rf = reactFlowInstanceRef.current;
+    const el = reactFlowWrapperRef.current;
+    if (!rf || !el) return { x: 40, y: 40 };
+
+    const rect = el.getBoundingClientRect();
+    const clientPoint = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const base = rf.screenToFlowPosition(clientPoint);
+
+    // Offset each spawn slightly so new nodes don't stack perfectly on top of each other.
+    const i = spawnIndexRef.current++;
+    const step = 18;
+    const dx = (i % 6) * step;
+    const dy = (Math.floor(i / 6) % 6) * step;
+    return { x: base.x + dx, y: base.y + dy };
+  }, []);
+
   // Add node from palette
   const addNode = useCallback(
     (type: string, label: string, defaultData: Partial<NodeData> = {}) => {
       const newId = `${type}-${Date.now()}`;
+      const position = getViewportCenterFlowPosition();
       const newNode: Node<NodeData> = {
         id: newId,
         type: type as any,
-        position: { x: Math.random() * 400, y: Math.random() * 400 },
+        position,
         data: { label, ...defaultData } as NodeData,
+        selected: true,
       };
-      setNodes((nds) => [...nds, newNode]);
+      // Ensure the new node is selected and, by being appended last, renders on top.
+      setNodes((nds) => [...nds.map((n) => ({ ...n, selected: false })), newNode]);
+      setSelectedNode(newNode);
+      setPanelTab("inspector");
 
       // For non-root nodes, auto-connect from Template Root (keeps compile simple)
       // NOTE: Do NOT auto-connect into pipeline nodes (compiler/generate). They should compile ONLY
       // what the user explicitly wires in, otherwise Template Root becomes a confusing "phantom input".
-      if (type !== "templateRoot" && type !== "compiler" && type !== "generate") {
+      if (type !== "templateRoot" && type !== "compiler" && type !== "generate" && type !== "refine") {
         const root = nodes.find((n) => n.type === "templateRoot");
         if (root) {
           setEdges((eds) => [
@@ -148,8 +177,36 @@ export function App() {
         }
       }
     },
-    [setEdges, setNodes, nodes]
+    [getViewportCenterFlowPosition, setEdges, setNodes, nodes]
   );
+
+  // Cmd+. zen mode toggle (hide UI chrome around canvas)
+  useEffect(() => {
+    const isTypingTarget = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName?.toLowerCase();
+      return (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        Boolean((el as any).isContentEditable)
+      );
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Similar to Figma: ⌘. toggles chrome
+      if ((e.metaKey || e.ctrlKey) && e.key === ".") {
+        if (isTypingTarget(e.target)) return;
+        e.preventDefault();
+        setZenMode((z) => !z);
+      }
+    };
+
+    const opts: AddEventListenerOptions = { capture: true };
+    window.addEventListener("keydown", onKeyDown, opts);
+    return () => window.removeEventListener("keydown", onKeyDown, opts);
+  }, []);
 
   // Update selected node data
   const updateNodeData = useCallback(
@@ -350,6 +407,98 @@ export function App() {
     [edges, nodes, setNodes],
   );
 
+  const autofillFromConnectedRefine = useCallback(
+    async (targetNodeId: string) => {
+      const target = nodes.find((n) => n.id === targetNodeId);
+      if (!target) {
+        alert("Select a node to autofill.");
+        return;
+      }
+
+      // Find a connected refine node (either direction).
+      const incoming = edges.filter((e) => e.target === targetNodeId);
+      const outgoing = edges.filter((e) => e.source === targetNodeId);
+
+      const candidateNodes: Array<Node<NodeData> | undefined> = [
+        ...incoming.map((e) => nodes.find((n) => n.id === e.source)),
+        ...outgoing.map((e) => nodes.find((n) => n.id === e.target)),
+      ];
+
+      const refineNode = candidateNodes.find((n) => n?.type === "refine") ?? null;
+      const lastResult = (refineNode?.data as any)?.lastResult as
+        | { improvedTemplate?: FFAStyleTemplate; nodeFieldEdits?: Record<string, unknown> }
+        | undefined;
+
+      const improved = lastResult?.improvedTemplate;
+      const nodeFieldEdits = (lastResult?.nodeFieldEdits ?? {}) as Record<string, unknown>;
+      if (!refineNode) {
+        alert("No Refine node connected. Connect a Refine node to this node first.");
+        return;
+      }
+      if (!improved) {
+        alert("Connected Refine node has no result yet. Run Refine first.");
+        return;
+      }
+
+      const apply = (nodeType: string, base: any) => {
+        const next: any = { ...(base ?? {}) };
+        if (nodeType === "subject") {
+          const s = improved?.object_specification?.subject;
+          if (typeof s === "string") next.subject = s;
+        }
+        if (nodeType === "styleDescription") {
+          const d = improved?.drawing_style?.description;
+          if (typeof d === "string") next.description = d;
+        }
+        if (nodeType === "colorPalette") {
+          const range = improved?.drawing_style?.color_palette?.range;
+          const hexes = improved?.drawing_style?.color_palette?.hexes;
+          if (typeof range === "string") next.range = range;
+          if (Array.isArray(hexes)) next.hexes = hexes;
+        }
+        if (nodeType === "lineQuality") {
+          const t = improved?.drawing_style?.line_quality?.type;
+          if (typeof t === "string") next.type = t;
+        }
+        if (nodeType === "lighting") {
+          const t = improved?.drawing_style?.lighting?.type;
+          if (typeof t === "string") next.type = t;
+        }
+        if (nodeType === "perspective") {
+          const p = improved?.drawing_style?.perspective;
+          if (typeof p === "string") next.perspective = p;
+        }
+        if (nodeType === "fillAndTexture") {
+          const f = improved?.drawing_style?.fill_and_texture?.filled_areas;
+          if (typeof f === "string") next.filled_areas = f;
+        }
+        if (nodeType === "background") {
+          const t = improved?.drawing_style?.background?.type;
+          const s = improved?.drawing_style?.background?.style;
+          if (typeof t === "string") next.type = t;
+          if (typeof s === "string") next.style = s;
+        }
+        if (nodeType === "output") {
+          const format = (improved as any)?.output?.format;
+          const ratio = (improved as any)?.output?.canvas_ratio;
+          if (typeof format === "string") next.format = format;
+          if (typeof ratio === "string") next.canvas_ratio = ratio;
+        }
+
+        const edits = (nodeFieldEdits as any)?.[nodeType];
+        if (edits && typeof edits === "object" && !Array.isArray(edits)) {
+          Object.assign(next, edits);
+        }
+        return next;
+      };
+
+      setNodes((nds) =>
+        nds.map((n) => (n.id === targetNodeId ? { ...n, data: apply(n.type ?? "unknown", n.data) } : n)),
+      );
+    },
+    [edges, nodes, setNodes],
+  );
+
   // Generate image
   const handleGenerate = useCallback(async () => {
     if (!compileResult.template) return;
@@ -398,7 +547,7 @@ export function App() {
       const imageNode: Node<ImageNodeData> = {
         id: `image-${Date.now()}`,
         type: "imageNode",
-        position: { x: Math.random() * 400, y: Math.random() * 400 },
+        position: getViewportCenterFlowPosition(),
         data: {
           label: `Image: ${entry.subject}`,
           image: entry.image,
@@ -407,10 +556,13 @@ export function App() {
           generationParams: entry.generationParams,
           timestamp: entry.timestamp,
         },
+        selected: true,
       };
-      setNodes((nds) => [...nds, imageNode]);
+      setNodes((nds) => [...nds.map((n) => ({ ...n, selected: false })), imageNode]);
+      setSelectedNode(imageNode as any);
+      setPanelTab("inspector");
     },
-    [setNodes]
+    [getViewportCenterFlowPosition, setNodes]
   );
 
   // Delete history entry
@@ -440,99 +592,130 @@ VITE_SUPABASE_ANON_KEY=...`}
   return (
     <div className="h-screen w-screen flex flex-col bg-background">
       {/* Header */}
-      <header className="border-b px-4 py-2 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Style Builder</h1>
-        <div className="text-xs text-muted-foreground">
-          Build visual style graphs → FFAStyles JSON → Generate images
-        </div>
-      </header>
+      {!zenMode && (
+        <header className="border-b px-4 py-2 flex items-center justify-between">
+          <h1 className="text-lg font-semibold">Style Builder</h1>
+          <div className="text-xs text-muted-foreground">
+            Build visual style graphs → FFAStyles JSON → Generate images
+          </div>
+        </header>
+      )}
 
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left: Node Palette */}
-        <aside className="w-64 border-r p-4 bg-muted/30 flex flex-col">
-          <div className="flex-1 overflow-y-auto">
-            <h2 className="text-sm font-semibold mb-3">Node Palette</h2>
-            <div className="space-y-2">
+        {!zenMode && (
+          <aside className="w-64 border-r p-4 bg-muted/30 flex flex-col">
+            <div className="flex-1 overflow-y-auto">
+              <h2 className="text-sm font-semibold mb-3">Node Palette</h2>
+              <div className="space-y-2">
+                <button
+                  onClick={() => addNode("imageInput", "Image Input", { image: "" } as any)}
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Image Input (Upload)
+                </button>
+                <button
+                  onClick={() => addNode("subject", "Subject", { subject: "" })}
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Subject
+                </button>
+                <button
+                  onClick={() =>
+                    addNode("styleDescription", "Style Description", { description: "" } as any)
+                  }
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Style Description
+                </button>
+                <button
+                  onClick={() => addNode("colorPalette", "Color Palette", { range: "" } as any)}
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Color Palette
+                </button>
+                <button
+                  onClick={() =>
+                    addNode("background", "Background", {
+                      type: "scene",
+                      style:
+                        "Create a coherent scene background that complements the subject. Keep the subject clear and centered; avoid clutter.",
+                      color: "#ffffff",
+                      outlineWidthPx: 24,
+                    } as any)
+                  }
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Background
+                </button>
+                <div className="pt-2 border-t" />
+                <button
+                  onClick={() => addNode("compiler", "Compiler", { showJson: true } as any)}
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Compiler (JSON)
+                </button>
+                <button
+                  onClick={() =>
+                    addNode("generate", "Generate", {
+                      subjectOverride: "",
+                      image: "",
+                      model: "gpt-image-1",
+                      size: "1024x1024",
+                    } as any)
+                  }
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Generate (in-node)
+                </button>
+                <button
+                  onClick={() =>
+                    addNode("refine", "Refine", {
+                      feedback: "",
+                      sourceImageNodeId: "",
+                      generatedImageNodeId: "",
+                      model: "gpt-5.2",
+                    } as any)
+                  }
+                  className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                >
+                  Refine (new branch)
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-3 mt-3 border-t space-y-2">
               <button
-                onClick={() => addNode("imageInput", "Image Input", { image: "" } as any)}
-                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                onClick={() => window.location.reload()}
+                className="w-full px-3 py-2 text-sm border rounded hover:bg-accent"
+                title="Reload the page (your workspace is saved locally)"
               >
-                Image Input (Upload)
+                Refresh
               </button>
               <button
-                onClick={() => addNode("subject", "Subject", { subject: "" })}
-                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
+                onClick={() => {
+                  const ok = window.confirm("Clear saved workspace and start fresh?");
+                  if (!ok) return;
+                  clearWorkspaceSnapshot();
+                  setSelectedNode(null);
+                  setPanelTab("generate");
+                  setGeneratedImage(null);
+                  setSubject("");
+                  setEdges([]);
+                  setNodes([]);
+                }}
+                className="w-full px-3 py-2 text-sm border rounded hover:bg-accent text-destructive"
+                title="Clear locally saved workspace"
               >
-                Subject
-              </button>
-              <button
-                onClick={() =>
-                  addNode("styleDescription", "Style Description", { description: "" } as any)
-                }
-                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-              >
-                Style Description
-              </button>
-              <button
-                onClick={() => addNode("colorPalette", "Color Palette", { range: "" } as any)}
-                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-              >
-                Color Palette
-              </button>
-              <div className="pt-2 border-t" />
-              <button
-                onClick={() => addNode("compiler", "Compiler", { showJson: true } as any)}
-                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-              >
-                Compiler (JSON)
-              </button>
-              <button
-                onClick={() =>
-                  addNode("generate", "Generate", {
-                    subjectOverride: "",
-                    image: "",
-                    model: "gpt-image-1",
-                    size: "1024x1024",
-                  } as any)
-                }
-                className="w-full text-left px-3 py-2 text-sm border rounded hover:bg-accent"
-              >
-                Generate (in-node)
+                Reset workspace
               </button>
             </div>
-          </div>
-
-          <div className="pt-3 mt-3 border-t space-y-2">
-            <button
-              onClick={() => window.location.reload()}
-              className="w-full px-3 py-2 text-sm border rounded hover:bg-accent"
-              title="Reload the page (your workspace is saved locally)"
-            >
-              Refresh
-            </button>
-            <button
-              onClick={() => {
-                const ok = window.confirm("Clear saved workspace and start fresh?");
-                if (!ok) return;
-                clearWorkspaceSnapshot();
-                setSelectedNode(null);
-                setPanelTab("generate");
-                setGeneratedImage(null);
-                setSubject("");
-                setEdges([]);
-                setNodes([]);
-              }}
-              className="w-full px-3 py-2 text-sm border rounded hover:bg-accent text-destructive"
-              title="Clear locally saved workspace"
-            >
-              Reset workspace
-            </button>
-          </div>
-        </aside>
+          </aside>
+        )}
 
         {/* Center: React Flow Canvas */}
-        <div className="flex-1 relative">
+        <div ref={reactFlowWrapperRef} className="flex-1 relative">
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -542,101 +725,142 @@ VITE_SUPABASE_ANON_KEY=...`}
             onNodeClick={onNodeClick}
             nodeTypes={nodeTypes}
             fitView
+            minZoom={0.05}
+            maxZoom={8}
+            // Interaction: make left-drag box-select (multi-select), and reserve panning for trackpad scroll / Space+drag / middle click.
+            selectionOnDrag
+            selectionMode={SelectionMode.Partial}
+            panOnDrag={[1, 2]}
+            panActivationKeyCode="Space"
+            panOnScroll
+            zoomOnScroll={false}
+            multiSelectionKeyCode="Shift"
+            onInit={(instance) => {
+              reactFlowInstanceRef.current = instance;
+            }}
           >
             <Background />
             <Controls />
             <MiniMap />
           </ReactFlow>
+
+          {/* Minimal chrome toggle (always available, even in zen mode) */}
+          <div className="absolute top-3 left-3 z-50 flex items-center gap-2">
+            <button
+              onClick={() => setZenMode((z) => !z)}
+              className="px-2 py-1 text-xs border rounded bg-background/90 backdrop-blur hover:bg-accent"
+              title="Toggle zen mode (⌘.)"
+            >
+              {zenMode ? "Show UI" : "Hide UI"} <span className="text-muted-foreground">⌘.</span>
+            </button>
+            {!zenMode && (
+              <button
+                onClick={() => setRightPanelOpen((v) => !v)}
+                className="px-2 py-1 text-xs border rounded bg-background/90 backdrop-blur hover:bg-accent"
+                title={rightPanelOpen ? "Hide inspector" : "Show inspector"}
+              >
+                {rightPanelOpen ? "Hide inspector" : "Show inspector"}
+              </button>
+            )}
+            {zenMode && (
+              <div className="text-[11px] text-muted-foreground bg-background/80 backdrop-blur border rounded px-2 py-1">
+                Zen mode — press <span className="font-medium">⌘.</span> to toggle
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Right: Panels */}
-        <aside className="w-96 border-l flex flex-col bg-muted/30">
-          {/* Tabs */}
-          <div className="flex border-b">
-            <button
-              onClick={() => setPanelTab("inspector")}
-              className={cn(
-                "flex-1 px-4 py-2 text-sm border-b-2 transition-colors",
-                panelTab === "inspector"
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              )}
-            >
-              Inspector
-            </button>
-            <button
-              onClick={() => setPanelTab("generate")}
-              className={cn(
-                "flex-1 px-4 py-2 text-sm border-b-2 transition-colors",
-                panelTab === "generate"
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              )}
-            >
-              Generate
-            </button>
-            <button
-              onClick={() => setPanelTab("history")}
-              className={cn(
-                "flex-1 px-4 py-2 text-sm border-b-2 transition-colors",
-                panelTab === "history"
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              )}
-            >
-              History
-            </button>
-          </div>
+        {!zenMode && rightPanelOpen && (
+          <aside className="w-96 border-l flex flex-col bg-muted/30">
+            {/* Tabs */}
+            <div className="flex border-b">
+              <button
+                onClick={() => setPanelTab("inspector")}
+                className={cn(
+                  "flex-1 px-4 py-2 text-sm border-b-2 transition-colors",
+                  panelTab === "inspector"
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Inspector
+              </button>
+              <button
+                onClick={() => setPanelTab("generate")}
+                className={cn(
+                  "flex-1 px-4 py-2 text-sm border-b-2 transition-colors",
+                  panelTab === "generate"
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Generate
+              </button>
+              <button
+                onClick={() => setPanelTab("history")}
+                className={cn(
+                  "flex-1 px-4 py-2 text-sm border-b-2 transition-colors",
+                  panelTab === "history"
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                )}
+              >
+                History
+              </button>
+            </div>
 
-          {/* Panel Content */}
-          <div className="flex-1 overflow-y-auto p-4">
-            {panelTab === "inspector" && (
-              <InspectorPanel
-                node={selectedNode}
-                onUpdate={updateNodeData}
-                onAutofillStyleFromImage={autofillStyleFromImage}
-                autofilling={autofillingNodeId === selectedNode?.id}
-              />
-            )}
+            {/* Panel Content */}
+            <div className="flex-1 overflow-y-auto p-4">
+              {panelTab === "inspector" && (
+                <InspectorPanel
+                  node={selectedNode}
+                  onUpdate={updateNodeData}
+                  onAutofillStyleFromImage={autofillStyleFromImage}
+                  onAutofillFromConnectedRefine={autofillFromConnectedRefine}
+                  autofilling={autofillingNodeId === selectedNode?.id}
+                />
+              )}
 
-            {panelTab === "generate" && (
-              <GeneratePanel
-                compileResult={compileResult}
-                subject={subject}
-                onSubjectChange={setSubject}
-                onGenerate={handleGenerate}
-                generating={generating}
-                generatedImage={generatedImage}
-                onAddToCanvas={() => {
-                  if (generatedImage && compileResult.template) {
-                    const effectiveSubject =
-                      subject.trim().length > 0
-                        ? subject.trim()
-                        : compileResult.template.object_specification.subject || "";
-                    const entry: HistoryEntry = {
-                      id: crypto.randomUUID(),
-                      timestamp: Date.now(),
-                      subject: effectiveSubject,
-                      compiledJson: compileResult.template,
-                      finalPrompt: generateJsonPrompt(compileResult.template, effectiveSubject),
-                      generationParams: { model: "gpt-image-1", size: "1024x1024" },
-                      image: generatedImage,
-                    };
-                    addImageToCanvas(entry);
-                  }
-                }}
-              />
-            )}
+              {panelTab === "generate" && (
+                <GeneratePanel
+                  compileResult={compileResult}
+                  subject={subject}
+                  onSubjectChange={setSubject}
+                  onGenerate={handleGenerate}
+                  generating={generating}
+                  generatedImage={generatedImage}
+                  onAddToCanvas={() => {
+                    if (generatedImage && compileResult.template) {
+                      const effectiveSubject =
+                        subject.trim().length > 0
+                          ? subject.trim()
+                          : compileResult.template.object_specification.subject || "";
+                      const entry: HistoryEntry = {
+                        id: crypto.randomUUID(),
+                        timestamp: Date.now(),
+                        subject: effectiveSubject,
+                        compiledJson: compileResult.template,
+                        finalPrompt: generateJsonPrompt(compileResult.template, effectiveSubject),
+                        generationParams: { model: "gpt-image-1", size: "1024x1024" },
+                        image: generatedImage,
+                      };
+                      addImageToCanvas(entry);
+                    }
+                  }}
+                />
+              )}
 
-            {panelTab === "history" && (
-              <HistoryPanel
-                history={history}
-                onAddToCanvas={addImageToCanvas}
-                onDelete={handleDeleteHistory}
-              />
-            )}
-          </div>
-        </aside>
+              {panelTab === "history" && (
+                <HistoryPanel
+                  history={history}
+                  onAddToCanvas={addImageToCanvas}
+                  onDelete={handleDeleteHistory}
+                />
+              )}
+            </div>
+          </aside>
+        )}
       </div>
     </div>
   );
@@ -647,11 +871,13 @@ function InspectorPanel({
   node,
   onUpdate,
   onAutofillStyleFromImage,
+  onAutofillFromConnectedRefine,
   autofilling,
 }: {
   node: Node<NodeData> | null;
   onUpdate: (updates: Partial<NodeData>) => void;
   onAutofillStyleFromImage: (styleNodeId: string) => void;
+  onAutofillFromConnectedRefine: (targetNodeId: string) => void;
   autofilling: boolean;
 }) {
   if (!node) {
@@ -712,8 +938,29 @@ function InspectorPanel({
           >
             {autofilling ? "Autofilling..." : "Autofill from connected image"}
           </button>
+          <button
+            onClick={() => onAutofillFromConnectedRefine(node.id)}
+            className="w-full px-3 py-2 text-sm bg-secondary text-secondary-foreground rounded hover:bg-secondary/90"
+          >
+            Autofill from connected refine
+          </button>
           <div className="text-[11px] text-muted-foreground">
             Connect an <span className="font-medium">Image Input (Upload)</span> node into this node, then click autofill.
+          </div>
+        </div>
+      )}
+
+      {type === "colorPalette" && (
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-muted-foreground">Refine</div>
+          <button
+            onClick={() => onAutofillFromConnectedRefine(node.id)}
+            className="w-full px-3 py-2 text-sm bg-secondary text-secondary-foreground rounded hover:bg-secondary/90"
+          >
+            Apply from connected refine
+          </button>
+          <div className="text-[11px] text-muted-foreground">
+            Connect a <span className="font-medium">Refine</span> node to this node to pull the latest refined palette.
           </div>
         </div>
       )}
@@ -839,6 +1086,17 @@ function GeneratePanel({
       >
         {generating ? "Generating..." : "Generate Image"}
       </button>
+
+      {generating && !generatedImage && (
+        <div className="space-y-2">
+          <div className="w-full aspect-square rounded border bg-muted/40 flex items-center justify-center">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <div className="h-4 w-4 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
+              Generating…
+            </div>
+          </div>
+        </div>
+      )}
 
       {generatedImage && (
         <div className="space-y-2">
