@@ -1,9 +1,12 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import { Handle, Position, useReactFlow, useStore, type NodeProps } from "@xyflow/react";
 import { cn } from "@/lib/utils";
 import { compileUpstream } from "@/graph/compiler";
 import type { CompilerNodeData, NodeData } from "../schema";
 import { getNodeUiSize, NodeResizeHandle } from "./NodeResizeHandle";
+import { Modal } from "@/components/Modal";
+import { getHistory } from "@/history/historyStore";
+import { supabase } from "@/supabase";
 
 function NodeHandles() {
   const common =
@@ -56,6 +59,82 @@ export const CompilerNode = memo(function CompilerNode({ id, data, selected }: N
   );
   const ui = getNodeUiSize(data);
 
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [styleName, setStyleName] = useState("");
+  const [styleDescription, setStyleDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [thumbnailDataUrl, setThumbnailDataUrl] = useState<string | null>(null);
+
+  const recentImages = useMemo(() => {
+    const h = getHistory();
+    return h
+      .filter((e) => typeof (e as any).image === "string" && (e as any).image.startsWith("data:image/"))
+      .slice(0, 12) as any[];
+  }, [saveOpen]);
+
+  async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+    const res = await fetch(dataUrl);
+    const buf = await res.arrayBuffer();
+    const ct = res.headers.get("content-type") ?? "application/octet-stream";
+    return new Blob([buf], { type: ct });
+  }
+
+  const handleSaveStyle = async () => {
+    if (!template) return;
+    const name = styleName.trim();
+    const description = styleDescription.trim();
+    if (!name || !description) {
+      setSaveError("Name and description are required.");
+      return;
+    }
+    setSaveError(null);
+    setSaving(true);
+    try {
+      // Insert style row first
+      const { data: styleRow, error } = await supabase
+        .from("sticker_styles")
+        .insert({
+          name,
+          description,
+          compiled_template: template,
+        } as any)
+        .select("id")
+        .single();
+      if (error) throw error;
+
+      let thumbnail_path: string | null = null;
+      let thumbnail_url: string | null = null;
+
+      if (thumbnailDataUrl) {
+        const blob = await dataUrlToBlob(thumbnailDataUrl);
+        const path = `${styleRow.id}/thumbnail.png`;
+        const up = await supabase.storage
+          .from("sticker_thumbnails")
+          .upload(path, blob, { contentType: blob.type || "image/png", upsert: true });
+        if (up.error) throw up.error;
+        thumbnail_path = path;
+        thumbnail_url = supabase.storage.from("sticker_thumbnails").getPublicUrl(path).data.publicUrl;
+
+        const { error: updErr } = await supabase
+          .from("sticker_styles")
+          .update({ thumbnail_path, thumbnail_url } as any)
+          .eq("id", styleRow.id);
+        if (updErr) throw updErr;
+      }
+
+      setSaveOpen(false);
+      setStyleName("");
+      setStyleDescription("");
+      setThumbnailDataUrl(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSaveError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -75,6 +154,18 @@ export const CompilerNode = memo(function CompilerNode({ id, data, selected }: N
       <div className="flex items-center justify-between gap-2 shrink-0">
         <div className="font-semibold text-sm">{label}</div>
         <div className="flex items-center gap-2">
+          <button
+            className="nodrag text-[11px] px-2 py-1 border rounded hover:bg-accent"
+            disabled={!template}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!template) return;
+              setSaveError(null);
+              setSaveOpen(true);
+            }}
+          >
+            Save Style
+          </button>
           <button
             className="nodrag text-[11px] px-2 py-1 border rounded hover:bg-accent"
             onClick={(e) => {
@@ -141,6 +232,96 @@ export const CompilerNode = memo(function CompilerNode({ id, data, selected }: N
           {json}
         </pre>
       )}
+
+      <Modal
+        open={saveOpen}
+        title="Save style"
+        description="Save this compiled style prompt for use in Pack Creator."
+        onClose={() => {
+          if (saving) return;
+          setSaveOpen(false);
+        }}
+      >
+        <div className="space-y-4">
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Name</label>
+            <input
+              className="w-full border rounded px-3 py-2 text-sm bg-background"
+              value={styleName}
+              onChange={(e) => setStyleName(e.target.value)}
+              placeholder="e.g. Glossy toy sticker (soft rim light)"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Description</label>
+            <textarea
+              className="w-full border rounded px-3 py-2 text-sm bg-background"
+              value={styleDescription}
+              onChange={(e) => setStyleDescription(e.target.value)}
+              rows={3}
+              placeholder="What is this style used for? Any constraints (transparent BG, die-cut outline, etc.)"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <div className="text-sm font-medium">Optional thumbnail</div>
+            {recentImages.length > 0 ? (
+              <div className="grid grid-cols-4 gap-2">
+                {recentImages.map((h) => {
+                  const img = (h as any).image as string;
+                  const selected = thumbnailDataUrl === img;
+                  return (
+                    <button
+                      key={(h as any).id}
+                      className={cn(
+                        "border rounded overflow-hidden hover:opacity-90",
+                        selected ? "ring-2 ring-primary" : "",
+                      )}
+                      onClick={() => setThumbnailDataUrl(img)}
+                      type="button"
+                    >
+                      <img src={img} alt={(h as any).subject ?? "thumb"} className="w-full h-20 object-cover" />
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">
+                No recent generated images found. Generate an image first to pick a thumbnail.
+              </div>
+            )}
+            {thumbnailDataUrl ? (
+              <button className="text-xs underline text-muted-foreground w-fit" onClick={() => setThumbnailDataUrl(null)}>
+                Clear thumbnail
+              </button>
+            ) : null}
+          </div>
+
+          {saveError ? (
+            <div className="p-2 rounded border text-sm bg-destructive/10 border-destructive/20 text-destructive">
+              {saveError}
+            </div>
+          ) : null}
+
+          <div className="flex items-center justify-end gap-2">
+            <button
+              className="px-3 py-2 text-sm border rounded hover:bg-accent"
+              disabled={saving}
+              onClick={() => setSaveOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="px-3 py-2 text-sm border rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              disabled={saving || !template}
+              onClick={handleSaveStyle}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 });
