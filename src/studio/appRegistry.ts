@@ -1,5 +1,5 @@
 import type React from "react";
-import { Wand2 } from "lucide-react";
+import { Package, Wand2 } from "lucide-react";
 
 export type StudioApp = {
   id: string;
@@ -18,6 +18,14 @@ export const STUDIO_APPS: StudioApp[] = [
     route: "/style-builder",
     icon: Wand2,
     loader: () => import("@/apps/styleBuilder/StyleBuilderApp"),
+  },
+  {
+    id: "pack-creator",
+    title: "Pack Creator",
+    description: "Select a saved style + subject list → generate sticker packs in the background.",
+    route: "/pack-creator",
+    icon: Package,
+    loader: () => import("@/apps/packCreator/PackCreatorApp"),
   },
 ];
 

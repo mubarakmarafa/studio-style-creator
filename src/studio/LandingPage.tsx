@@ -23,7 +23,7 @@ export function LandingPage() {
                 className="group border rounded-xl bg-card text-card-foreground hover:bg-accent transition-colors p-4"
               >
                 <div className="flex items-start gap-3">
-                  <div className="h-10 w-10 rounded-lg border bg-background/80 flex items-center justify-center">
+                  <div className="h-10 w-10 min-w-10 shrink-0 rounded-lg border bg-background/80 flex items-center justify-center">
                     <Icon className="h-5 w-5 text-primary" />
                   </div>
                   <div className="min-w-0">

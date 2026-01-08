@@ -3,4 +3,10 @@
 # If you plan to ship this, set this to true and add auth on the client.
 verify_jwt = false
 
+[functions.sticker-pack]
+verify_jwt = false
+
+[functions.sticker-worker]
+verify_jwt = false
+
 
