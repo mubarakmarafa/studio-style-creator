@@ -30,7 +30,7 @@ import {
   saveWorkspaceSnapshot,
 } from "@/graph/workspacePersistence";
 import { useNavigate, useParams } from "react-router-dom";
-import { getOrCreateClientId } from "./projectsClient";
+import { getSharedClientId } from "./projectsClient";
 import { supabase } from "@/supabase";
 
 type PanelTab = "inspector" | "generate" | "history";
@@ -66,7 +66,7 @@ export default function StyleBuilderApp() {
   const navigate = useNavigate();
   const params = useParams();
   const projectId = (params as any)?.projectId as string | undefined;
-  const clientId = useMemo(() => getOrCreateClientId(), []);
+  const sharedClientId = useMemo(() => getSharedClientId(), []);
   const [projectName, setProjectName] = useState<string>("Project");
   const [projectError, setProjectError] = useState<string | null>(null);
   const [projectLoading, setProjectLoading] = useState<boolean>(true);
@@ -137,9 +137,9 @@ export default function StyleBuilderApp() {
 
         const row: any = data;
         setProjectName(typeof row?.name === "string" ? row.name : "Project");
-        if (typeof row?.client_id === "string" && row.client_id !== clientId) {
-          // no-auth model: allow opening, but flag it.
-          console.warn("[StyleBuilder] opening project owned by different client_id");
+        // no-auth model: allow opening anything; client_id is informational only in single-user mode.
+        if (typeof row?.client_id === "string" && row.client_id !== sharedClientId) {
+          console.warn("[StyleBuilder] opening project created under different client_id scope");
         }
 
         const snap = row?.snapshot ?? null;

@@ -1,6 +1,5 @@
 import { supabase } from "@/supabase";
-
-const CLIENT_ID_KEY = "styleBuilder:clientId";
+import { ENV } from "@/env";
 
 function formatPostgrestError(e: any): string {
   if (!e) return "Unknown Supabase error";
@@ -33,34 +32,26 @@ export type StyleBuilderAssetRow = {
   created_at: string;
 };
 
-export function getOrCreateClientId(): string {
-  try {
-    const existing = localStorage.getItem(CLIENT_ID_KEY);
-    if (existing && typeof existing === "string" && existing.trim()) return existing;
-  } catch {
-    // ignore
-  }
-  const next = crypto.randomUUID();
-  try {
-    localStorage.setItem(CLIENT_ID_KEY, next);
-  } catch {
-    // ignore
-  }
-  return next;
+/**
+ * Single-user / no-auth mode:
+ * - We still write a `client_id` column (for future multi-user upgrades),
+ * - but we do NOT scope reads by it. Projects are visible to anyone with the URL.
+ */
+export function getSharedClientId(): string {
+  const v = (ENV.STYLE_BUILDER_CLIENT_ID ?? "public").trim();
+  return v || "public";
 }
 
-export async function listProjects(clientId: string): Promise<StyleBuilderProjectRow[]> {
+export async function listProjects(): Promise<StyleBuilderProjectRow[]> {
   const { data, error } = await supabase
     .from("style_builder_projects")
     .select("id,client_id,name,description,thumbnail_asset_id,created_at,updated_at")
-    .eq("client_id", clientId)
     .order("updated_at", { ascending: false });
   if (error) throw new Error(formatPostgrestError(error));
   return (data ?? []) as any;
 }
 
 export async function createProject(opts: {
-  clientId: string;
   name?: string;
   description?: string;
   snapshot?: unknown;
@@ -68,7 +59,7 @@ export async function createProject(opts: {
   const { data, error } = await supabase
     .from("style_builder_projects")
     .insert({
-      client_id: opts.clientId,
+      client_id: getSharedClientId(),
       name: (opts.name ?? "Untitled project").trim() || "Untitled project",
       description: opts.description ?? "",
       snapshot:

@@ -36,6 +36,7 @@ frontend is deployed without the required Vite env vars.
    - Add `VITE_SUPABASE_URL`
    - Add `VITE_SUPABASE_ANON_KEY`
    - (Optional) Add `VITE_SUPABASE_FUNCTIONS_BASE_URL` if your Supabase URL isn’t standard
+   - (Optional) Add `VITE_STYLE_BUILDER_CLIENT_ID` (default: `public`) — used only as metadata for new Style Builder projects
    - Make sure you add them to the correct environment(s): **Production** (and **Preview** if you use preview deploys).
 3. **Redeploy** (env vars are baked into the Vite build output):
    - Trigger a new deployment in Vercel (or “Redeploy” the latest).

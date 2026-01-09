@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   createProject,
   deleteProject,
   getAssetsByIds,
   getLatestGeneratedAssetsByProjectIds,
-  getOrCreateClientId,
   listProjects,
   renameProject,
   setProjectThumbnailAssetId,
@@ -19,7 +18,6 @@ export default function StyleBuilderProjectsPage() {
   const [projects, setProjects] = useState<StyleBuilderProjectRow[]>([]);
   const [thumbsByAssetId, setThumbsByAssetId] = useState<Record<string, string>>({});
 
-  const clientId = useMemo(() => getOrCreateClientId(), []);
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
@@ -29,7 +27,7 @@ export default function StyleBuilderProjectsPage() {
     setErr(null);
     setLoading(true);
     try {
-      const rows = await listProjects(clientId);
+      const rows = await listProjects();
       const projectsWithThumb = rows;
 
       // 1) Load explicit thumbnail assets (fast path)
@@ -80,7 +78,7 @@ export default function StyleBuilderProjectsPage() {
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientId]);
+  }, []);
 
   return (
     <div className="h-full w-full overflow-auto">
@@ -105,7 +103,7 @@ export default function StyleBuilderProjectsPage() {
               setCreating(true);
               setErr(null);
               try {
-                const p = await createProject({ clientId });
+                const p = await createProject({});
                 navigate(`/style-builder/${p.id}`);
               } catch (e) {
                 setErr(e instanceof Error ? e.message : String(e));
@@ -122,9 +120,6 @@ export default function StyleBuilderProjectsPage() {
           <Link className="px-3 py-2 text-sm border rounded hover:bg-accent" to="/home">
             Back to apps
           </Link>
-          <div className="ml-auto text-[11px] text-muted-foreground">
-            Client: <span className="font-mono">{clientId.slice(0, 8)}…</span>
-          </div>
         </div>
 
         {loading ? (
