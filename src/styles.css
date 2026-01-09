@@ -251,4 +251,14 @@ h2 {
   border: 1px solid var(--border);
 }
 
+/* XYFlow (@xyflow/react) handle sizing.
+   Note: XYFlow's CSS is imported inside app modules and can load after `styles.css`,
+   so we use `!important` to ensure our handle size wins consistently. */
+:where(.xyflow__handle, .react-flow__handle) {
+  width: 20px !important;
+  height: 20px !important;
+  min-width: 20px !important;
+  min-height: 20px !important;
+}
+
 

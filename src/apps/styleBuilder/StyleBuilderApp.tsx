@@ -29,6 +29,9 @@ import {
   loadWorkspaceSnapshot,
   saveWorkspaceSnapshot,
 } from "@/graph/workspacePersistence";
+import { useNavigate, useParams } from "react-router-dom";
+import { getOrCreateClientId } from "./projectsClient";
+import { supabase } from "@/supabase";
 
 type PanelTab = "inspector" | "generate" | "history";
 
@@ -57,17 +60,173 @@ export default function StyleBuilderApp() {
   const reactFlowWrapperRef = useRef<HTMLDivElement | null>(null);
   const reactFlowInstanceRef = useRef<ReactFlowInstance<Node<NodeData>, Edge> | null>(null);
   const spawnIndexRef = useRef(0);
+  const pendingInitialFitRef = useRef(false);
+  const didInitialFitRef = useRef(false);
 
-  // Rehydrate workspace from local storage once on mount.
-  useEffect(() => {
-    const snap = loadWorkspaceSnapshot();
-    if (!snap) return;
+  const navigate = useNavigate();
+  const params = useParams();
+  const projectId = (params as any)?.projectId as string | undefined;
+  const clientId = useMemo(() => getOrCreateClientId(), []);
+  const [projectName, setProjectName] = useState<string>("Project");
+  const [projectError, setProjectError] = useState<string | null>(null);
+  const [projectLoading, setProjectLoading] = useState<boolean>(true);
+  const [remoteReady, setRemoteReady] = useState<boolean>(false);
 
-    setNodes(snap.nodes);
-    setEdges(snap.edges);
-    if (typeof snap.subject === "string") setSubject(snap.subject);
+  function seedStarterPipeline() {
+    const now = Date.now();
+    const nImage = { id: `imageInput-${now}`, type: "imageInput", position: { x: 0, y: 120 }, data: { label: "Image Input", image: "" } as any };
+    const nStyle = { id: `styleDescription-${now}`, type: "styleDescription", position: { x: 300, y: 120 }, data: { label: "Style Description", description: "" } as any };
+    const nCompiler = { id: `compiler-${now}`, type: "compiler", position: { x: 600, y: 120 }, data: { label: "Compiler", showJson: true } as any };
+    const nGen = { id: `generate-${now}`, type: "generate", position: { x: 900, y: 120 }, data: { label: "Generate", subjectOverride: "", image: "", model: "gpt-image-1", size: "1024x1024" } as any };
+    const es: Edge[] = [
+      { id: `e-${nImage.id}-${nStyle.id}`, source: nImage.id, target: nStyle.id },
+      { id: `e-${nStyle.id}-${nCompiler.id}`, source: nStyle.id, target: nCompiler.id },
+      { id: `e-${nCompiler.id}-${nGen.id}`, source: nCompiler.id, target: nGen.id },
+    ];
+    setNodes([nImage as any, nStyle as any, nCompiler as any, nGen as any]);
+    setEdges(es);
     setSelectedNode(null);
-  }, [setEdges, setNodes]);
+    setPanelTab("generate");
+    pendingInitialFitRef.current = true;
+  }
+
+  function sanitizeSnapshot(payload: { nodes: Node<NodeData>[]; edges: Edge[]; subject: string }) {
+    const stripDataUrl = (v: any) => (typeof v === "string" && v.startsWith("data:") ? "" : v);
+    const nextNodes = payload.nodes.map((n) => {
+      const d: any = n.data ?? {};
+      const nextData: any = { ...d };
+      if ("image" in nextData) nextData.image = stripDataUrl(nextData.image);
+      if (Array.isArray(nextData.images)) {
+        nextData.images = nextData.images.map((it: any) => ({ ...it, image: stripDataUrl(it?.image) }));
+      }
+      return { ...n, data: nextData };
+    });
+    return { ...payload, nodes: nextNodes };
+  }
+
+  // Load project snapshot from Supabase (by route param).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!projectId) {
+        setProjectError("Missing project id in URL.");
+        setProjectLoading(false);
+        return;
+      }
+      // Reset per-project fit tracking.
+      didInitialFitRef.current = false;
+      pendingInitialFitRef.current = true;
+      setProjectError(null);
+      setProjectLoading(true);
+      setRemoteReady(false);
+      try {
+        const { data, error } = await supabase
+          .from("style_builder_projects")
+          .select("id,client_id,name,snapshot,updated_at")
+          .eq("id", projectId)
+          .single();
+        if (error) {
+          // Supabase Postgrest errors are often plain objects; make them readable.
+          const msg =
+            typeof (error as any)?.message === "string"
+              ? (error as any).message
+              : JSON.stringify(error);
+          throw new Error(msg);
+        }
+        if (cancelled) return;
+
+        const row: any = data;
+        setProjectName(typeof row?.name === "string" ? row.name : "Project");
+        if (typeof row?.client_id === "string" && row.client_id !== clientId) {
+          // no-auth model: allow opening, but flag it.
+          console.warn("[StyleBuilder] opening project owned by different client_id");
+        }
+
+        const snap = row?.snapshot ?? null;
+        const snapNodes = Array.isArray(snap?.nodes) ? (snap.nodes as any[]) : null;
+        const snapEdges = Array.isArray(snap?.edges) ? (snap.edges as any[]) : null;
+        const snapSubject = typeof snap?.subject === "string" ? snap.subject : "";
+
+        if (snapNodes && snapEdges && (snapNodes.length > 0 || snapEdges.length > 0)) {
+          setNodes(snapNodes as any);
+          setEdges(snapEdges as any);
+          setSubject(snapSubject);
+          setSelectedNode(null);
+          pendingInitialFitRef.current = true;
+        } else {
+          seedStarterPipeline();
+          setSubject("");
+        }
+
+        setRemoteReady(true);
+      } catch (e) {
+        if (cancelled) return;
+        setProjectError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setProjectLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  // One-time fitView after initial load/seed so the canvas is centered (especially for new projects).
+  useEffect(() => {
+    if (!projectId) return;
+    if (projectLoading) return;
+    if (!remoteReady) return;
+    if (didInitialFitRef.current) return;
+    if (!pendingInitialFitRef.current) return;
+    if (nodes.length === 0) return;
+
+    const rf = reactFlowInstanceRef.current;
+    if (!rf) return;
+
+    // Wait a tick so ReactFlow has applied node dimensions.
+    pendingInitialFitRef.current = false;
+    didInitialFitRef.current = true;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try {
+          rf.fitView({ padding: 0.25, duration: 250 });
+        } catch {
+          // ignore
+        }
+      });
+    });
+  }, [nodes.length, projectId, projectLoading, remoteReady]);
+
+  // Remember last opened project so the sidebar can jump back into it.
+  useEffect(() => {
+    if (!projectId) return;
+    try {
+      localStorage.setItem("styleBuilder:lastProjectId", projectId);
+    } catch {
+      // ignore
+    }
+  }, [projectId]);
+
+  // Local fallback cache (per browser) in case Supabase is offline; also avoids blank screen on refresh.
+  useEffect(() => {
+    if (!projectId) return;
+    try {
+      const key = `styleBuilder:project:${projectId}`;
+      const raw = localStorage.getItem(key);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as any;
+      if (!parsed || typeof parsed !== "object") return;
+      if (Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) {
+        setNodes(parsed.nodes);
+        setEdges(parsed.edges);
+        if (typeof parsed.subject === "string") setSubject(parsed.subject);
+      }
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   // Compile graph
   const compileResult = useMemo(() => compileGraph(nodes, edges), [nodes, edges]);
@@ -109,18 +268,52 @@ export default function StyleBuilderApp() {
     });
   }, [setNodes]);
 
-  // Persist workspace locally (debounced) so refreshes don't lose work.
+  // Persist workspace locally (debounced) so refreshes don't lose work (fallback cache).
   useEffect(() => {
     const t = window.setTimeout(() => {
       const payload = { nodes, edges, subject };
       const json = JSON.stringify(payload);
       if (json === lastSavedRef.current) return;
       lastSavedRef.current = json;
-      saveWorkspaceSnapshot(payload);
+      saveWorkspaceSnapshot(payload); // legacy global cache
+      if (projectId) {
+        try {
+          localStorage.setItem(`styleBuilder:project:${projectId}`, json);
+        } catch {
+          // ignore
+        }
+      }
     }, 250);
 
     return () => window.clearTimeout(t);
   }, [nodes, edges, subject]);
+
+  // Persist workspace to Supabase project snapshot (debounced).
+  useEffect(() => {
+    if (!projectId) return;
+    if (!remoteReady) return; // don't clobber server snapshot before initial load
+    const t = window.setTimeout(() => {
+      const payload = sanitizeSnapshot({ nodes, edges, subject });
+      const snapshot = {
+        version: "style-builder-project-v1",
+        ...payload,
+        savedAt: Date.now(),
+      };
+      (async () => {
+        try {
+          const { error } = await supabase
+            .from("style_builder_projects")
+            .update({ snapshot } as any)
+            .eq("id", projectId);
+          if (error) console.warn("[StyleBuilder] failed to save snapshot:", error.message);
+        } catch (e: unknown) {
+          console.warn("[StyleBuilder] failed to save snapshot:", e);
+        }
+      })();
+    }, 600);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, edges, subject, projectId, remoteReady]);
 
   // Handle node selection
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node<NodeData>) => {
@@ -264,6 +457,33 @@ export default function StyleBuilderApp() {
     return null;
   }
 
+  const ensureImageDataUrl = useCallback(async (imageOrUrl: string): Promise<string> => {
+    const s = String(imageOrUrl || "").trim();
+    if (!s) return "";
+    if (s.startsWith("data:image/")) return s;
+    if (s.startsWith("data:")) {
+      // Some fetchers might produce application/octet-stream; the proxy requires data:image/*
+      const m = s.match(/^data:([^;]+);base64,(.*)$/);
+      if (m && m[2]) return `data:image/png;base64,${m[2]}`;
+      return "";
+    }
+    // If the user persisted the image as a public URL, convert it to data URL for vision calls.
+    try {
+      const res = await fetch(s);
+      if (!res.ok) throw new Error(`Failed to fetch image URL (${res.status})`);
+      const headerCt = res.headers.get("content-type") ?? "";
+      const ct = headerCt.startsWith("image/") ? headerCt : "image/png";
+      const buf = await res.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      return `data:${ct};base64,${b64}`;
+    } catch {
+      return "";
+    }
+  }, []);
+
   const autofillStyleFromImage = useCallback(
     async (styleNodeId: string) => {
       const styleNode = nodes.find((n) => n.id === styleNodeId);
@@ -284,16 +504,23 @@ export default function StyleBuilderApp() {
       const imageNode =
         candidateNodes.find((n) => n?.type === "imageInput" || n?.type === "imageNode") ?? null;
 
-      const imageDataUrl = (imageNode?.data as any)?.image as string | undefined;
+      const imageDataUrlOrUrl = (imageNode?.data as any)?.image as string | undefined;
       if (!imageNode) {
         alert(
           "No image node connected. Connect an Image Input (Upload) node (or a generated Image node) to this Style Description node.",
         );
         return;
       }
-      if (!imageDataUrl || !String(imageDataUrl).trim()) {
+      if (!imageDataUrlOrUrl || !String(imageDataUrlOrUrl).trim()) {
         alert(
           "Image node is connected, but no image is uploaded yet. Upload an image in the Image Input node first.",
+        );
+        return;
+      }
+      const imageDataUrl = await ensureImageDataUrl(imageDataUrlOrUrl);
+      if (!imageDataUrl || !imageDataUrl.startsWith("data:image/")) {
+        alert(
+          "Could not read the connected image as a data URL. If this is a saved project image URL, ensure it is publicly accessible, or re-upload the image.",
         );
         return;
       }
@@ -436,7 +663,7 @@ export default function StyleBuilderApp() {
         setAutofillingNodeId(null);
       }
     },
-    [edges, nodes, setNodes],
+    [edges, nodes, setNodes, ensureImageDataUrl],
   );
 
   const autofillFromConnectedRefine = useCallback(
@@ -694,7 +921,27 @@ VITE_SUPABASE_ANON_KEY=...`}
       {/* Header */}
       {!zenMode && (
         <header className="border-b px-4 py-2 flex items-center justify-between">
-          <h1 className="text-lg font-semibold">Style Builder</h1>
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              className="px-2 py-1 text-xs border rounded hover:bg-accent"
+              onClick={() => navigate("/style-builder/projects")}
+              title="Back to projects"
+            >
+              Projects
+            </button>
+            <h1 className="text-lg font-semibold truncate" title={projectName}>
+              {projectName}
+            </h1>
+            {projectLoading ? (
+              <span className="text-xs text-muted-foreground">Loading…</span>
+            ) : projectError ? (
+              <span className="text-xs text-destructive truncate" title={projectError}>
+                {projectError}
+              </span>
+            ) : (
+              <span className="text-xs text-muted-foreground">Saved</span>
+            )}
+          </div>
           <div className="text-xs text-muted-foreground">
             Build visual style graphs → FFAStyles JSON → Generate images
           </div>
@@ -835,6 +1082,20 @@ VITE_SUPABASE_ANON_KEY=...`}
             multiSelectionKeyCode="Shift"
             onInit={(instance) => {
               reactFlowInstanceRef.current = instance;
+              // If we mounted after a seed/load, run the initial fit as soon as possible.
+              if (pendingInitialFitRef.current && !didInitialFitRef.current && nodes.length > 0) {
+                pendingInitialFitRef.current = false;
+                didInitialFitRef.current = true;
+                requestAnimationFrame(() => {
+                  requestAnimationFrame(() => {
+                    try {
+                      instance.fitView({ padding: 0.25, duration: 250 });
+                    } catch {
+                      // ignore
+                    }
+                  });
+                });
+              }
             }}
           >
             <Background />

@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Handle, Position, useReactFlow, useStore, type NodeProps } from "@xyflow/react";
 import { cn } from "@/lib/utils";
 import { compileUpstream } from "@/graph/compiler";
@@ -7,10 +7,11 @@ import { getNodeUiSize, NodeResizeHandle } from "./NodeResizeHandle";
 import { Modal } from "@/components/Modal";
 import { getHistory } from "@/history/historyStore";
 import { supabase } from "@/supabase";
+import { proxyChat } from "@/openaiProxyClient";
 
 function NodeHandles() {
   const common =
-    "w-4 h-4 rounded-full bg-foreground/80 dark:bg-foreground/70 border-2 border-background pointer-events-auto z-50 cursor-crosshair";
+    "!w-5 !h-5 rounded-full bg-foreground/80 dark:bg-foreground/70 border-2 border-background pointer-events-auto z-50 cursor-crosshair";
 
   return (
     <>
@@ -65,13 +66,153 @@ export const CompilerNode = memo(function CompilerNode({ id, data, selected }: N
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [thumbnailDataUrl, setThumbnailDataUrl] = useState<string | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestError, setSuggestError] = useState<string | null>(null);
+  const styleNameRef = useRef(styleName);
+  const styleDescRef = useRef(styleDescription);
+
+  useEffect(() => {
+    styleNameRef.current = styleName;
+  }, [styleName]);
+  useEffect(() => {
+    styleDescRef.current = styleDescription;
+  }, [styleDescription]);
+
+  const suggestNameAndDescription = async (opts: { overwrite: boolean }) => {
+    if (!template) return;
+
+    // "Fill" mode is safe: only populate empty fields.
+    if (!opts.overwrite) {
+      const hasName = styleNameRef.current.trim().length > 0;
+      const hasDesc = styleDescRef.current.trim().length > 0;
+      if (hasName && hasDesc) {
+        setSuggestError("Name and description are already filled. Use Regenerate to overwrite.");
+        return;
+      }
+    }
+
+    setSuggestError(null);
+    setSuggesting(true);
+    try {
+      const instruction = [
+        "You are helping a user save a reusable style preset for a sticker/content generator.",
+        "Given the compiled style template JSON, propose:",
+        "- a short, descriptive style name (3–7 words)",
+        "- a super short description (1–2 sentences) focusing on constraints and intended look (mention transparent background/die-cut if present).",
+        "",
+        "Return ONLY valid JSON (no markdown, no code fences) with this exact shape:",
+        '{ "name": string, "description": string }',
+        "",
+        "COMPILED_TEMPLATE_JSON:",
+        JSON.stringify(template),
+      ].join("\n");
+
+      const resp = await proxyChat(instruction, { model: "gpt-4.1-mini" });
+      const parsed = extractJsonObject(resp.text);
+      const nextName = typeof parsed?.name === "string" ? parsed.name.trim() : "";
+      const nextDesc = typeof parsed?.description === "string" ? parsed.description.trim() : "";
+
+      if (!nextName && !nextDesc) {
+        throw new Error("AI did not return a valid {name, description} JSON object.");
+      }
+
+      if (opts.overwrite) {
+        if (nextName) setStyleName(nextName);
+        if (nextDesc) setStyleDescription(nextDesc);
+      } else {
+        if (nextName) setStyleName((prev) => (prev.trim() ? prev : nextName));
+        if (nextDesc) setStyleDescription((prev) => (prev.trim() ? prev : nextDesc));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSuggestError(msg);
+      console.warn("[CompilerNode] suggestion failed:", e);
+    } finally {
+      setSuggesting(false);
+    }
+  };
+
+  function extractJsonObject(text: string): any | null {
+    if (!text) return null;
+    const trimmed = text.trim();
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // ignore
+    }
+    const unfenced = trimmed.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
+    try {
+      return JSON.parse(unfenced);
+    } catch {
+      // ignore
+    }
+    const first = unfenced.indexOf("{");
+    const last = unfenced.lastIndexOf("}");
+    if (first >= 0 && last > first) {
+      const slice = unfenced.slice(first, last + 1);
+      try {
+        return JSON.parse(slice);
+      } catch {
+        // ignore
+      }
+    }
+    return null;
+  }
 
   const recentImages = useMemo(() => {
-    const h = getHistory();
-    return h
-      .filter((e) => typeof (e as any).image === "string" && (e as any).image.startsWith("data:image/"))
-      .slice(0, 12) as any[];
-  }, [saveOpen]);
+    if (!saveOpen) return [] as Array<{ id: string; image: string; label?: string }>;
+
+    const out: Array<{ id: string; image: string; label?: string }> = [];
+    const seen = new Set<string>();
+
+    // 1) History (panel-generated, stored in localStorage)
+    for (const h of getHistory() as any[]) {
+      const img = h?.image;
+      if (typeof img !== "string") continue;
+      if (!img.trim()) continue;
+      if (!(img.startsWith("data:image/") || img.startsWith("http"))) continue;
+      if (seen.has(img)) continue;
+      seen.add(img);
+      out.push({ id: String(h?.id ?? crypto.randomUUID()), image: img, label: h?.subject });
+      if (out.length >= 12) return out;
+    }
+
+    // 2) GenerateNode outputs + Image nodes on canvas (this fixes the “no recent images found” bug)
+    for (const n of nodesSnapshot as any[]) {
+      const t = String(n?.type ?? "");
+      const d = (n?.data ?? {}) as any;
+
+      const add = (img: any, label?: string) => {
+        if (typeof img !== "string") return;
+        if (!img.trim()) return;
+        if (!(img.startsWith("data:image/") || img.startsWith("http"))) return;
+        if (seen.has(img)) return;
+        seen.add(img);
+        out.push({ id: `${t}:${String(n?.id ?? crypto.randomUUID())}:${out.length}`, image: img, label });
+      };
+
+      if (t === "generate") {
+        if (Array.isArray(d.images)) {
+          for (const it of d.images) {
+            add(it?.image, it?.subject);
+            if (out.length >= 12) return out;
+          }
+        }
+        add(d.image, d.subjectOverride);
+        if (out.length >= 12) return out;
+      }
+
+      if (t === "imageNode" || t === "imageInput") {
+        add(d.image, d.subject || d.filename);
+        if (out.length >= 12) return out;
+      }
+    }
+
+    return out.slice(0, 12);
+  }, [saveOpen, nodesSnapshot]);
+
+  // Note: AI suggestions are manual via "Fill with AI" / "Regenerate" so we don't
+  // surprise users or silently fail when proxy config isn't set up yet.
 
   async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
     const res = await fetch(dataUrl);
@@ -244,13 +385,27 @@ export const CompilerNode = memo(function CompilerNode({ id, data, selected }: N
       >
         <div className="space-y-4">
           <div className="grid gap-2">
-            <label className="text-sm font-medium">Name</label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-sm font-medium">Name</label>
+              <button
+                type="button"
+                className="text-xs px-2 py-1 border rounded hover:bg-accent disabled:opacity-50"
+                disabled={suggesting || !template}
+                onClick={() => suggestNameAndDescription({ overwrite: false })}
+                title="Fill empty fields with an AI suggestion"
+              >
+                Fill with AI
+              </button>
+            </div>
             <input
               className="w-full border rounded px-3 py-2 text-sm bg-background"
               value={styleName}
               onChange={(e) => setStyleName(e.target.value)}
               placeholder="e.g. Glossy toy sticker (soft rim light)"
             />
+            {suggesting ? (
+              <div className="text-[11px] text-muted-foreground">Suggesting name + description…</div>
+            ) : null}
           </div>
 
           <div className="grid gap-2">
@@ -262,6 +417,22 @@ export const CompilerNode = memo(function CompilerNode({ id, data, selected }: N
               rows={3}
               placeholder="What is this style used for? Any constraints (transparent BG, die-cut outline, etc.)"
             />
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] text-muted-foreground">AI suggestions are optional—you can edit freely.</div>
+              <button
+                type="button"
+                className="text-xs underline text-muted-foreground disabled:opacity-50"
+                disabled={suggesting || !template}
+                onClick={async () => {
+                  await suggestNameAndDescription({ overwrite: true });
+                }}
+              >
+                Regenerate
+              </button>
+            </div>
+            {suggestError ? (
+              <div className="text-[11px] text-destructive">{suggestError}</div>
+            ) : null}
           </div>
 
           <div className="grid gap-2">
@@ -281,7 +452,11 @@ export const CompilerNode = memo(function CompilerNode({ id, data, selected }: N
                       onClick={() => setThumbnailDataUrl(img)}
                       type="button"
                     >
-                      <img src={img} alt={(h as any).subject ?? "thumb"} className="w-full h-20 object-cover" />
+                      <img
+                        src={img}
+                        alt={(h as any).label ?? (h as any).subject ?? "thumb"}
+                        className="w-full h-20 object-cover"
+                      />
                     </button>
                   );
                 })}

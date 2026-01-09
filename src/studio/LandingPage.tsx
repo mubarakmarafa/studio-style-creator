@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
-import { STUDIO_APPS } from "./appRegistry";
+import { STUDIO_APPS, WIP_STUDIO_APPS } from "./appRegistry";
+import { cn } from "@/lib/utils";
 
 export function LandingPage() {
   return (
@@ -19,7 +20,7 @@ export function LandingPage() {
             return (
               <Link
                 key={app.id}
-                to={app.route}
+                to={app.navTo ?? app.route}
                 className="group border rounded-xl bg-card text-card-foreground hover:bg-accent transition-colors p-4"
               >
                 <div className="flex items-start gap-3">
@@ -35,6 +36,32 @@ export function LandingPage() {
                   </div>
                 </div>
               </Link>
+            );
+          })}
+
+          {WIP_STUDIO_APPS.map((app) => {
+            const Icon = app.icon;
+            return (
+              <div
+                key={app.id}
+                role="button"
+                aria-disabled="true"
+                className={cn(
+                  "border rounded-xl bg-card text-card-foreground p-4",
+                  "opacity-50 grayscale cursor-not-allowed select-none",
+                )}
+              >
+                <div className="flex items-start gap-3">
+                  <div className="h-10 w-10 min-w-10 shrink-0 rounded-lg border bg-background/80 flex items-center justify-center">
+                    <Icon className="h-5 w-5 text-muted-foreground" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-semibold">{app.title}</div>
+                    <div className="text-xs text-muted-foreground mt-1">Under Construction</div>
+                    <div className="text-sm text-muted-foreground mt-2">{app.description}</div>
+                  </div>
+                </div>
+              </div>
             );
           })}
         </div>

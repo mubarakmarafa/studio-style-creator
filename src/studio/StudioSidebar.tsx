@@ -47,7 +47,7 @@ export function StudioSidebar() {
         {STUDIO_APPS.map((app) => {
           const Icon = app.icon;
           return (
-            <SidebarIconLink key={app.id} to={app.route} title={app.title}>
+            <SidebarIconLink key={app.id} to={app.navTo ?? app.route} title={app.title}>
               <Icon className="h-5 w-5" />
             </SidebarIconLink>
           );

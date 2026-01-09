@@ -3,10 +3,12 @@ import { Handle, Position, useReactFlow, type NodeProps } from "@xyflow/react";
 import { cn } from "@/lib/utils";
 import type { ImageInputNodeData } from "../schema";
 import { getNodeUiSize, NodeResizeHandle } from "./NodeResizeHandle";
+import { useParams } from "react-router-dom";
+import { supabase } from "@/supabase";
 
 function NodeHandles() {
   const common =
-    "w-4 h-4 rounded-full bg-foreground/80 dark:bg-foreground/70 border-2 border-background pointer-events-auto z-50 cursor-crosshair";
+    "!w-5 !h-5 rounded-full bg-foreground/80 dark:bg-foreground/70 border-2 border-background pointer-events-auto z-50 cursor-crosshair";
 
   return (
     <>
@@ -30,6 +32,8 @@ export function ImageInputNode({ id, data, selected }: NodeProps) {
   const rf = useReactFlow();
   const nodeData = (data as unknown as ImageInputNodeData) ?? ({} as ImageInputNodeData);
   const ui = getNodeUiSize(data);
+  const params = useParams();
+  const projectId = (params as any)?.projectId as string | undefined;
 
   const stop = (e: SyntheticEvent) => {
     e.stopPropagation();
@@ -72,13 +76,71 @@ export function ImageInputNode({ id, data, selected }: NodeProps) {
           onChange={async (e) => {
             const file = e.target.files?.[0];
             if (!file) return;
-            const dataUrl = await readFileAsDataUrl(file);
-            updateNodeData({
-              image: dataUrl,
-              filename: file.name,
-              mimeType: file.type,
-              timestamp: Date.now(),
-            });
+            updateNodeData({ uploading: true, upload_error: "" } as any);
+            try {
+              // Upload to Supabase Storage (preferred for project persistence).
+              if (!projectId) {
+                // Fallback: keep data URL (legacy behavior) if not in project route.
+                const dataUrl = await readFileAsDataUrl(file);
+                updateNodeData({
+                  image: dataUrl,
+                  filename: file.name,
+                  mimeType: file.type,
+                  timestamp: Date.now(),
+                  uploading: false,
+                  upload_error: "",
+                } as any);
+                return;
+              }
+
+              const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 80) || "upload.png";
+              const path = `${projectId}/uploaded/${id}/${crypto.randomUUID()}-${safeName}`;
+              const up = await supabase.storage
+                .from("style_builder_assets")
+                .upload(path, file, { contentType: file.type || "image/png", upsert: true });
+              if (up.error) throw up.error;
+              const publicUrl = supabase.storage.from("style_builder_assets").getPublicUrl(path).data.publicUrl;
+
+              // Record asset metadata
+              const { data: assetRow, error: insErr } = await supabase
+                .from("style_builder_assets")
+                .insert({
+                  project_id: projectId,
+                  kind: "uploaded",
+                  storage_bucket: "style_builder_assets",
+                  storage_path: path,
+                  public_url: publicUrl,
+                  node_id: id,
+                } as any)
+                .select("id")
+                .single();
+              if (insErr) throw insErr;
+
+              updateNodeData({
+                image: publicUrl,
+                filename: file.name,
+                mimeType: file.type,
+                timestamp: Date.now(),
+                asset_id: assetRow?.id ?? null,
+                uploading: false,
+                upload_error: "",
+              } as any);
+            } catch (err) {
+              console.warn("[ImageInputNode] upload failed:", err);
+              // Fallback to data URL so the user can still proceed.
+              const dataUrl = await readFileAsDataUrl(file);
+              updateNodeData({
+                image: dataUrl,
+                filename: file.name,
+                mimeType: file.type,
+                timestamp: Date.now(),
+                uploading: false,
+                upload_error: err instanceof Error ? err.message : String(err),
+              } as any);
+            } finally {
+              // Allow re-uploading the same file by resetting the input.
+              e.currentTarget.value = "";
+            }
           }}
         />
       </label>
@@ -103,6 +165,14 @@ export function ImageInputNode({ id, data, selected }: NodeProps) {
           {nodeData.filename}
         </div>
       )}
+      {(nodeData as any).uploading ? (
+        <div className="text-[11px] text-muted-foreground mt-2 shrink-0">Uploading…</div>
+      ) : null}
+      {(nodeData as any).upload_error ? (
+        <div className="text-[11px] text-destructive mt-1 shrink-0 truncate" title={(nodeData as any).upload_error}>
+          Upload failed (using local image)
+        </div>
+      ) : null}
     </div>
   );
 }

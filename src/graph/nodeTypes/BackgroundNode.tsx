@@ -8,7 +8,7 @@ type BackgroundMode = "scene" | "solidColor" | "dieCutStickerOutline" | "transpa
 
 function NodeHandles() {
   const common =
-    "w-4 h-4 rounded-full bg-foreground/80 dark:bg-foreground/70 border-2 border-background pointer-events-auto z-50 cursor-crosshair";
+    "!w-5 !h-5 rounded-full bg-foreground/80 dark:bg-foreground/70 border-2 border-background pointer-events-auto z-50 cursor-crosshair";
 
   return (
     <>

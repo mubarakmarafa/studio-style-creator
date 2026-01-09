@@ -143,11 +143,57 @@ async function handleStyleFromImage(
       { status: 400, headers: corsHeaders(req) },
     );
   }
-  if (!imageDataUrl.startsWith("data:image/")) {
+  // OpenAI accepts data URLs and https URLs, but OpenAI may not be able to reach
+  // some URLs (timeouts / blocked networks). To make this robust, if a URL is provided,
+  // we fetch it here and pass OpenAI a data URL.
+  const isDataImage = imageDataUrl.startsWith("data:image/");
+  const isHttpUrl = imageDataUrl.startsWith("http://") || imageDataUrl.startsWith("https://");
+  if (!isDataImage && !isHttpUrl) {
     return json(
-      { error: "imageDataUrl must be a data URL starting with data:image/..." },
+      { error: "imageDataUrl must be a data URL starting with data:image/... or a public http(s) URL" },
       { status: 400, headers: corsHeaders(req) },
     );
+  }
+
+  let finalImageUrl = imageDataUrl;
+  if (isHttpUrl) {
+    try {
+      const ctl = new AbortController();
+      const timeout = setTimeout(() => ctl.abort(), 12_000);
+      const res = await fetch(imageDataUrl, { signal: ctl.signal });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        return json(
+          { error: "Failed to download image URL", status: res.status, statusText: res.statusText },
+          { status: 400, headers: corsHeaders(req) },
+        );
+      }
+      const ct = res.headers.get("content-type") ?? "image/png";
+      if (!ct.startsWith("image/")) {
+        return json(
+          { error: "Downloaded URL is not an image", content_type: ct },
+          { status: 400, headers: corsHeaders(req) },
+        );
+      }
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      // Hard cap to avoid huge payloads
+      const MAX_BYTES = 10 * 1024 * 1024; // 10MB
+      if (bytes.byteLength > MAX_BYTES) {
+        return json(
+          { error: "Image too large", bytes: bytes.byteLength, maxBytes: MAX_BYTES },
+          { status: 400, headers: corsHeaders(req) },
+        );
+      }
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      finalImageUrl = `data:${ct};base64,${b64}`;
+    } catch (e) {
+      return json(
+        { error: "Failed to download image URL", message: e instanceof Error ? e.message : String(e) },
+        { status: 400, headers: corsHeaders(req) },
+      );
+    }
   }
 
   const upstream = await fetch("https://api.openai.com/v1/responses", {
@@ -163,7 +209,7 @@ async function handleStyleFromImage(
           role: "user",
           content: [
             { type: "input_text", text: instruction },
-            { type: "input_image", image_url: imageDataUrl },
+            { type: "input_image", image_url: finalImageUrl },
           ],
         },
       ],

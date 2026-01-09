@@ -6,6 +6,8 @@ import { generateImage } from "@/generation/supabaseImageClient";
 import { ENV_STATE } from "@/env";
 import type { GenerateNodeData, NodeData } from "../schema";
 import { getNodeUiSize, NodeResizeHandle } from "./NodeResizeHandle";
+import { useParams } from "react-router-dom";
+import { supabase } from "@/supabase";
 
 function normalizeImageSize(size: string): string {
   const allowed = new Set(["1024x1024", "1536x1024", "1024x1536", "auto"]);
@@ -16,7 +18,7 @@ function normalizeImageSize(size: string): string {
 
 function NodeHandles() {
   const common =
-    "w-4 h-4 rounded-full bg-foreground/80 dark:bg-foreground/70 border-2 border-background pointer-events-auto z-50 cursor-crosshair";
+    "!w-5 !h-5 rounded-full bg-foreground/80 dark:bg-foreground/70 border-2 border-background pointer-events-auto z-50 cursor-crosshair";
 
   return (
     <>
@@ -38,6 +40,53 @@ export const GenerateNode = memo(function GenerateNode({ id, data, selected }: N
   const [generating, setGenerating] = useState(false);
   const abortControllersRef = useRef<AbortController[]>([]);
   const runControlRef = useRef<{ runId: string; stopped: boolean } | null>(null);
+  const params = useParams();
+  const projectId = (params as any)?.projectId as string | undefined;
+
+  async function uploadGeneratedImage(dataUrl: string, subject: string): Promise<{ publicUrl: string; assetId?: string }> {
+    if (!projectId) return { publicUrl: dataUrl };
+    // Convert data URL to blob
+    const res = await fetch(dataUrl);
+    const buf = await res.arrayBuffer();
+    const ct = res.headers.get("content-type") ?? "image/png";
+    const blob = new Blob([buf], { type: ct });
+    const safeSubject = subject.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 60) || "subject";
+    const path = `${projectId}/generated/${id}/${crypto.randomUUID()}-${safeSubject}.png`;
+    const up = await supabase.storage
+      .from("style_builder_assets")
+      .upload(path, blob, { contentType: blob.type || "image/png", upsert: true });
+    if (up.error) throw up.error;
+    const publicUrl = supabase.storage.from("style_builder_assets").getPublicUrl(path).data.publicUrl;
+    const { data: assetRow, error } = await supabase
+      .from("style_builder_assets")
+      .insert({
+        project_id: projectId,
+        kind: "generated",
+        storage_bucket: "style_builder_assets",
+        storage_path: path,
+        public_url: publicUrl,
+        node_id: id,
+        subject,
+      } as any)
+      .select("id")
+      .single();
+    if (error) throw error;
+
+    // Make the most recently generated image the project thumbnail (projects list cards).
+    // Non-blocking: if this fails due to RLS or transient issues, generation should still succeed.
+    try {
+      if (assetRow?.id) {
+        const { error: thumbErr } = await supabase
+          .from("style_builder_projects")
+          .update({ thumbnail_asset_id: assetRow.id } as any)
+          .eq("id", projectId);
+        if (thumbErr) console.warn("[GenerateNode] failed to set project thumbnail:", thumbErr.message);
+      }
+    } catch (e) {
+      console.warn("[GenerateNode] failed to set project thumbnail:", e);
+    }
+    return { publicUrl, assetId: assetRow?.id };
+  }
 
   const upstreamCompilerId = useMemo(() => {
     const incoming = edgesSnapshot.filter((e) => e.target === id);
@@ -216,6 +265,16 @@ export const GenerateNode = memo(function GenerateNode({ id, data, selected }: N
                     const prompt = generateJsonPrompt(compileResult.template!, subj);
                     const result = await generateImage(prompt, { model, size, quality, signal: controller.signal });
                     const dataUrl = `data:${result.contentType};base64,${result.base64}`;
+                    let finalUrl = dataUrl;
+                    let assetId: string | undefined = undefined;
+                    try {
+                      const uploaded = await uploadGeneratedImage(dataUrl, subj);
+                      finalUrl = uploaded.publicUrl;
+                      assetId = uploaded.assetId;
+                    } catch (e) {
+                      // If upload fails (e.g. storage policy), keep data URL so the user still sees results.
+                      console.warn("[GenerateNode] upload failed; using data URL:", e);
+                    }
                     // Guard: if a newer run started, don't clobber.
                     rf.setNodes((nds) =>
                       nds.map((n) => {
@@ -223,7 +282,7 @@ export const GenerateNode = memo(function GenerateNode({ id, data, selected }: N
                         const cur = (n.data ?? {}) as GenerateNodeData;
                         if (cur.lastRunId !== runId) return n;
                         const curImages = (cur.images ?? []).map((it) =>
-                          it.subject === subj ? { ...it, status: "ready", image: dataUrl } : it,
+                          it.subject === subj ? { ...it, status: "ready", image: finalUrl, asset_id: assetId } : it,
                         );
                         return {
                           ...n,

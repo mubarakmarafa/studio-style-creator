@@ -75,6 +75,29 @@ export default function PackCreatorApp() {
   const workerKickRef = useRef<number | null>(null);
   const workerInFlightRef = useRef(false);
 
+  // Edit: Style
+  const [editStyleOpen, setEditStyleOpen] = useState(false);
+  const [editingStyleId, setEditingStyleId] = useState<string | null>(null);
+  const [editStyleName, setEditStyleName] = useState("");
+  const [editStyleDescription, setEditStyleDescription] = useState("");
+  const [editStyleJson, setEditStyleJson] = useState("");
+  const [editStyleSaving, setEditStyleSaving] = useState(false);
+  const [editStyleErr, setEditStyleErr] = useState<string | null>(null);
+  const [editStyleThumbUrl, setEditStyleThumbUrl] = useState<string | null>(null);
+  const [editStyleThumbCandidates, setEditStyleThumbCandidates] = useState<
+    Array<{ id: string; url: string; label?: string }>
+  >([]);
+  const [editStyleThumbLoading, setEditStyleThumbLoading] = useState(false);
+
+  // Edit: Subject list
+  const [editListOpen, setEditListOpen] = useState(false);
+  const [editingListId, setEditingListId] = useState<string | null>(null);
+  const [editListName, setEditListName] = useState("");
+  const [editListDescription, setEditListDescription] = useState("");
+  const [editListSubjectsText, setEditListSubjectsText] = useState("");
+  const [editListSaving, setEditListSaving] = useState(false);
+  const [editListErr, setEditListErr] = useState<string | null>(null);
+
   const selectedList = useMemo(
     () => subjectLists.find((l) => l.id === selectedSubjectListId) ?? null,
     [subjectLists, selectedSubjectListId],
@@ -183,6 +206,227 @@ export default function PackCreatorApp() {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchStyleThumbnailCandidates(styleId: string) {
+    // Find recent rendered stickers for this style across all jobs.
+    const { data: j, error: jErr } = await supabase
+      .from("sticker_jobs")
+      .select("id,created_at")
+      .eq("style_id", styleId)
+      .order("created_at", { ascending: false })
+      .limit(30);
+    if (jErr) throw jErr;
+    const jobIds = (j ?? []).map((row: any) => String(row.id)).filter(Boolean);
+    if (jobIds.length === 0) return [];
+
+    const { data: st, error: stErr } = await supabase
+      .from("stickers")
+      .select("id,job_id,subject,image_url,created_at,status")
+      .in("job_id", jobIds as any)
+      .eq("status", "done")
+      .not("image_url", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(60);
+    if (stErr) throw stErr;
+
+    const out: Array<{ id: string; url: string; label?: string }> = [];
+    const seen = new Set<string>();
+    for (const r of (st ?? []) as any[]) {
+      const url = String(r.image_url ?? "");
+      if (!url) continue;
+      if (seen.has(url)) continue;
+      seen.add(url);
+      out.push({
+        id: String(r.id ?? `${r.job_id}:${out.length}`),
+        url,
+        label: String(r.subject ?? "").trim() || undefined,
+      });
+      if (out.length >= 24) break;
+    }
+    return out;
+  }
+
+  async function openEditStyle(styleId: string) {
+    setErr(null);
+    setEditStyleErr(null);
+    setEditStyleThumbCandidates([]);
+    setEditStyleThumbUrl(null);
+    setEditStyleOpen(true);
+    setEditingStyleId(styleId);
+    setEditStyleSaving(false);
+
+    try {
+      const { data, error } = await supabase
+        .from("sticker_styles")
+        .select("id,name,description,compiled_template,thumbnail_url,thumbnail_path")
+        .eq("id", styleId)
+        .single();
+      if (error) throw error;
+
+      const row: any = data;
+      setEditStyleName(String(row?.name ?? ""));
+      setEditStyleDescription(String(row?.description ?? ""));
+      setEditStyleJson(JSON.stringify(row?.compiled_template ?? {}, null, 2));
+
+      const existingThumb = typeof row?.thumbnail_url === "string" && row.thumbnail_url.trim() ? row.thumbnail_url : null;
+      if (existingThumb) setEditStyleThumbUrl(existingThumb);
+
+      setEditStyleThumbLoading(true);
+      try {
+        const candidates = await fetchStyleThumbnailCandidates(styleId);
+        // Put current thumbnail (if present) first so it doesn't "disappear" from selection.
+        const merged = [
+          ...(existingThumb ? [{ id: "current", url: existingThumb, label: "Current thumbnail" }] : []),
+          ...candidates.filter((c) => c.url !== existingThumb),
+        ];
+        setEditStyleThumbCandidates(merged);
+      } finally {
+        setEditStyleThumbLoading(false);
+      }
+    } catch (e) {
+      setEditStyleErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function saveEditedStyle() {
+    const styleId = editingStyleId;
+    if (!styleId) return;
+
+    const name = editStyleName.trim();
+    if (!name) {
+      setEditStyleErr("Style name is required.");
+      return;
+    }
+
+    let compiled_template: any = null;
+    try {
+      compiled_template = JSON.parse(editStyleJson);
+    } catch {
+      setEditStyleErr("Compiled JSON must be valid JSON.");
+      return;
+    }
+
+    setEditStyleErr(null);
+    setEditStyleSaving(true);
+    try {
+      const { data: before } = await supabase
+        .from("sticker_styles")
+        .select("thumbnail_path,thumbnail_url")
+        .eq("id", styleId)
+        .maybeSingle();
+
+      // Update name/description/template
+      const { error } = await supabase
+        .from("sticker_styles")
+        .update({
+          name,
+          description: editStyleDescription.trim(),
+          compiled_template,
+        } as any)
+        .eq("id", styleId);
+      if (error) throw error;
+
+      // Optional thumbnail upload
+      const selectedThumb = (editStyleThumbUrl ?? "").trim();
+      if (selectedThumb) {
+        const res = await fetch(selectedThumb);
+        if (!res.ok) throw new Error(`Failed to fetch thumbnail image (${res.status})`);
+        const buf = await res.arrayBuffer();
+        const ct = res.headers.get("content-type") ?? "image/png";
+        const blob = new Blob([buf], { type: ct });
+
+        const path = `${styleId}/thumbnail.png`;
+        const up = await supabase.storage
+          .from("sticker_thumbnails")
+          .upload(path, blob, { contentType: blob.type || "image/png", upsert: true });
+        if (up.error) throw up.error;
+        const publicUrl = supabase.storage.from("sticker_thumbnails").getPublicUrl(path).data.publicUrl;
+
+        const { error: updErr } = await supabase
+          .from("sticker_styles")
+          .update({ thumbnail_path: path, thumbnail_url: publicUrl } as any)
+          .eq("id", styleId);
+        if (updErr) throw updErr;
+      } else if ((before as any)?.thumbnail_url) {
+        // Allow clearing the thumbnail (we keep the object around; just remove the pointer).
+        const { error: clrErr } = await supabase
+          .from("sticker_styles")
+          .update({ thumbnail_path: null, thumbnail_url: null } as any)
+          .eq("id", styleId);
+        if (clrErr) throw clrErr;
+      }
+
+      setEditStyleOpen(false);
+      setEditingStyleId(null);
+      await refreshAll();
+    } catch (e) {
+      setEditStyleErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEditStyleSaving(false);
+    }
+  }
+
+  async function openEditSubjectList(listId: string) {
+    setErr(null);
+    setEditListErr(null);
+    setEditListOpen(true);
+    setEditingListId(listId);
+    setEditListSaving(false);
+
+    try {
+      const { data, error } = await supabase
+        .from("subject_lists")
+        .select("id,name,description,subjects_text,subjects,csv_filename")
+        .eq("id", listId)
+        .single();
+      if (error) throw error;
+      const row: any = data;
+      setEditListName(String(row?.name ?? ""));
+      setEditListDescription(String(row?.description ?? ""));
+      setEditListSubjectsText(String(row?.subjects_text ?? ""));
+    } catch (e) {
+      setEditListErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function saveEditedSubjectList() {
+    const listId = editingListId;
+    if (!listId) return;
+
+    const name = editListName.trim();
+    if (!name) {
+      setEditListErr("List name is required.");
+      return;
+    }
+    const subjects = parseSubjectsText(editListSubjectsText);
+    if (subjects.length === 0) {
+      setEditListErr("Add at least one subject.");
+      return;
+    }
+
+    setEditListErr(null);
+    setEditListSaving(true);
+    try {
+      const { error } = await supabase
+        .from("subject_lists")
+        .update({
+          name,
+          description: editListDescription.trim(),
+          subjects_text: editListSubjectsText,
+          subjects,
+        } as any)
+        .eq("id", listId);
+      if (error) throw error;
+
+      setEditListOpen(false);
+      setEditingListId(null);
+      await refreshAll();
+    } catch (e) {
+      setEditListErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEditListSaving(false);
     }
   }
 
@@ -318,7 +562,13 @@ export default function PackCreatorApp() {
     if (!ok) return;
     setErr(null);
     const { error } = await supabase.from("subject_lists").delete().eq("id", id);
-    if (error) setErr(error.message);
+    if (error) {
+      const msg =
+        (error as any)?.code === "23503" || String(error.message).toLowerCase().includes("foreign key")
+          ? "Can't delete this subject list because it's referenced by an existing job. Delete the job(s) first."
+          : error.message;
+      setErr(msg);
+    }
     await refreshAll();
   }
 
@@ -327,7 +577,13 @@ export default function PackCreatorApp() {
     if (!ok) return;
     setErr(null);
     const { error } = await supabase.from("sticker_styles").delete().eq("id", id);
-    if (error) setErr(error.message);
+    if (error) {
+      const msg =
+        (error as any)?.code === "23503" || String(error.message).toLowerCase().includes("foreign key")
+          ? "Can't delete this style because it's referenced by an existing job. Delete the job(s) first."
+          : error.message;
+      setErr(msg);
+    }
     await refreshAll();
   }
 
@@ -641,9 +897,18 @@ export default function PackCreatorApp() {
                         <div className="font-medium truncate">{s.name}</div>
                         <div className="text-xs text-muted-foreground line-clamp-2 mt-1">{s.description}</div>
                       </button>
-                      <button className="text-xs underline text-muted-foreground" onClick={() => deleteStyle(s.id)}>
-                        Delete
-                      </button>
+                      <div className="flex items-center gap-3 shrink-0">
+                        <button
+                          className="text-xs underline text-muted-foreground"
+                          onClick={() => openEditStyle(s.id)}
+                          title="Edit style (name, JSON, thumbnail)"
+                        >
+                          Edit
+                        </button>
+                        <button className="text-xs underline text-muted-foreground" onClick={() => deleteStyle(s.id)}>
+                          Delete
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -668,9 +933,18 @@ export default function PackCreatorApp() {
                         {l.csv_filename ? ` • CSV: ${l.csv_filename}` : ""}
                       </div>
                     </button>
-                    <button className="text-xs underline text-muted-foreground" onClick={() => deleteSubjectList(l.id)}>
-                      Delete
-                    </button>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <button
+                        className="text-xs underline text-muted-foreground"
+                        onClick={() => openEditSubjectList(l.id)}
+                        title="Edit subject list"
+                      >
+                        Edit
+                      </button>
+                      <button className="text-xs underline text-muted-foreground" onClick={() => deleteSubjectList(l.id)}>
+                        Delete
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -956,6 +1230,187 @@ export default function PackCreatorApp() {
                     </div>
                   </div>
                 ))}
+            </div>
+          </div>
+        </Modal>
+
+        {/* Edit Style */}
+        <Modal
+          open={editStyleOpen}
+          title="Edit style"
+          description="Update name, compiled JSON, and (optionally) choose a thumbnail from generated stickers."
+          onClose={() => {
+            if (editStyleSaving) return;
+            setEditStyleOpen(false);
+          }}
+        >
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Name</label>
+              <input
+                className="w-full border rounded px-3 py-2 text-sm bg-background"
+                value={editStyleName}
+                onChange={(e) => setEditStyleName(e.target.value)}
+                placeholder="Style name"
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Description</label>
+              <textarea
+                className="w-full border rounded px-3 py-2 text-sm bg-background"
+                value={editStyleDescription}
+                onChange={(e) => setEditStyleDescription(e.target.value)}
+                rows={2}
+                placeholder="Short description (optional)"
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Compiled JSON</label>
+              <textarea
+                className="w-full border rounded px-3 py-2 text-xs font-mono bg-background"
+                value={editStyleJson}
+                onChange={(e) => setEditStyleJson(e.target.value)}
+                rows={10}
+                placeholder="{ ... }"
+              />
+              <div className="text-[11px] text-muted-foreground">
+                Tip: You can paste/modify the template JSON. Save will validate it.
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-medium">Thumbnail</div>
+                <button
+                  type="button"
+                  className="text-xs underline text-muted-foreground"
+                  onClick={() => setEditStyleThumbUrl(null)}
+                >
+                  Clear
+                </button>
+              </div>
+              {editStyleThumbLoading ? (
+                <div className="text-sm text-muted-foreground">Loading candidates…</div>
+              ) : editStyleThumbCandidates.length > 0 ? (
+                <div className="grid grid-cols-4 gap-2">
+                  {editStyleThumbCandidates.map((c) => {
+                    const selected = editStyleThumbUrl === c.url;
+                    return (
+                      <button
+                        key={c.id}
+                        className={`border rounded overflow-hidden hover:opacity-90 ${selected ? "ring-2 ring-primary" : ""}`}
+                        onClick={() => setEditStyleThumbUrl(c.url)}
+                        type="button"
+                        title={c.label ?? "Use as thumbnail"}
+                      >
+                        <img src={c.url} alt={c.label ?? "thumb"} className="w-full h-16 object-cover" />
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="text-sm text-muted-foreground">
+                  No generated sticker images found for this style yet. Run a job in the Gallery to get thumbnail options.
+                </div>
+              )}
+              <div className="text-[11px] text-muted-foreground">
+                Selected thumbnail will be copied into the <span className="font-mono">sticker_thumbnails</span> bucket.
+              </div>
+            </div>
+
+            {editStyleErr ? (
+              <div className="p-2 rounded border text-sm bg-destructive/10 border-destructive/20 text-destructive">
+                {editStyleErr}
+              </div>
+            ) : null}
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                className="px-3 py-2 text-sm border rounded hover:bg-accent"
+                disabled={editStyleSaving}
+                onClick={() => setEditStyleOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-3 py-2 text-sm border rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                disabled={editStyleSaving || !editingStyleId}
+                onClick={saveEditedStyle}
+              >
+                {editStyleSaving ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+          </div>
+        </Modal>
+
+        {/* Edit Subject list */}
+        <Modal
+          open={editListOpen}
+          title="Edit subject list"
+          description="Update list name/description and edit subjects."
+          onClose={() => {
+            if (editListSaving) return;
+            setEditListOpen(false);
+          }}
+        >
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Name</label>
+              <input
+                className="w-full border rounded px-3 py-2 text-sm bg-background"
+                value={editListName}
+                onChange={(e) => setEditListName(e.target.value)}
+                placeholder="List name"
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Description</label>
+              <input
+                className="w-full border rounded px-3 py-2 text-sm bg-background"
+                value={editListDescription}
+                onChange={(e) => setEditListDescription(e.target.value)}
+                placeholder="Description (optional)"
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Subjects</label>
+              <textarea
+                className="w-full border rounded px-3 py-2 text-sm bg-background"
+                value={editListSubjectsText}
+                onChange={(e) => setEditListSubjectsText(e.target.value)}
+                rows={8}
+                placeholder={"comma or newline separated\ncat, dog\nhamster"}
+              />
+              <div className="text-[11px] text-muted-foreground">
+                Parsed: <span className="font-medium">{parseSubjectsText(editListSubjectsText).length}</span>
+              </div>
+            </div>
+
+            {editListErr ? (
+              <div className="p-2 rounded border text-sm bg-destructive/10 border-destructive/20 text-destructive">
+                {editListErr}
+              </div>
+            ) : null}
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                className="px-3 py-2 text-sm border rounded hover:bg-accent"
+                disabled={editListSaving}
+                onClick={() => setEditListOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-3 py-2 text-sm border rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                disabled={editListSaving || !editingListId}
+                onClick={saveEditedSubjectList}
+              >
+                {editListSaving ? "Saving…" : "Save changes"}
+              </button>
             </div>
           </div>
         </Modal>
