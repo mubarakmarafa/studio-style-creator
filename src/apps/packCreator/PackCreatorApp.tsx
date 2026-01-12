@@ -70,6 +70,8 @@ export default function PackCreatorApp() {
   const [downloading, setDownloading] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [galleryJobId, setGalleryJobId] = useState<string | null>(null);
+  const [galleryJob, setGalleryJob] = useState<StickerJob | null>(null);
+  const [galleryStickers, setGalleryStickers] = useState<StickerRow[]>([]);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const pollRef = useRef<number | null>(null);
   const workerKickRef = useRef<number | null>(null);
@@ -611,6 +613,25 @@ export default function PackCreatorApp() {
     setStickers((st ?? []) as any);
   }
 
+  async function loadGalleryJob(jobId: string) {
+    const { data: j, error: jErr } = await supabase
+      .from("sticker_jobs")
+      .select("id,style_id,subject_list_id,total,completed,status,error,created_at")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (jErr) throw jErr;
+    if (!j) throw new Error("Job not found");
+    setGalleryJob(j as any);
+
+    const { data: st, error: stErr } = await supabase
+      .from("stickers")
+      .select("id,job_id,subject,status,attempts,image_url,error")
+      .eq("job_id", jobId)
+      .order("created_at", { ascending: true });
+    if (stErr) throw stErr;
+    setGalleryStickers((st ?? []) as any);
+  }
+
   async function downloadJobZip(jobId: string) {
     setDownloading(true);
     setErr(null);
@@ -681,6 +702,8 @@ export default function PackCreatorApp() {
       }
       if (galleryJobId === jobId) {
         setGalleryJobId(null);
+        setGalleryJob(null);
+        setGalleryStickers([]);
         setGalleryOpen(false);
       }
       await refreshAll();
@@ -1035,6 +1058,19 @@ export default function PackCreatorApp() {
               {starting ? "Starting…" : "Start job"}
             </button>
 
+            <button
+              className="mt-2 w-full px-3 py-2 text-sm border rounded hover:bg-accent"
+              onClick={() => {
+                setGalleryOpen(true);
+                setGalleryJobId(null);
+                setGalleryJob(null);
+                setGalleryStickers([]);
+              }}
+              title="Browse past generations"
+            >
+              Gallery
+            </button>
+
             {job ? (
               <div className="mt-5 space-y-3">
                 <div className="text-sm">
@@ -1114,123 +1150,141 @@ export default function PackCreatorApp() {
               </div>
             )}
           </section>
-
-          <section className="border rounded-xl bg-card p-4 lg:col-span-1">
-            <div className="font-semibold">Gallery</div>
-            <div className="mt-3 space-y-2">
-              {jobs.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No jobs yet.</div>
-              ) : (
-                <div className="space-y-2">
-                  {jobs.map((j) => {
-                    const cover = jobCovers[j.id];
-                    const styleName = styles.find((s) => s.id === j.style_id)?.name ?? "Style";
-                    const listName = subjectLists.find((l) => l.id === j.subject_list_id)?.name ?? "Subjects";
-                    return (
-                      <div
-                        key={j.id}
-                        className="border rounded-lg overflow-hidden bg-background hover:bg-accent/30 cursor-pointer"
-                        onClick={async () => {
-                          setGalleryJobId(j.id);
-                          setGalleryOpen(true);
-                          await loadJob(j.id);
-                          subscribeToJob(j.id);
-                        }}
-                      >
-                        <div className="flex gap-3 p-2">
-                          <div className="w-14 h-14 rounded border bg-muted/30 overflow-hidden shrink-0">
-                            {cover ? (
-                              <img src={cover} alt="cover" className="w-14 h-14 object-cover" />
-                            ) : (
-                              <div className="w-14 h-14 flex items-center justify-center text-[10px] text-muted-foreground">
-                                {j.status}
-                              </div>
-                            )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="text-sm font-medium truncate">{styleName}</div>
-                            <div className="text-xs text-muted-foreground truncate">{listName}</div>
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {j.completed}/{j.total} • {j.status}
-                            </div>
-                          </div>
-                          <div className="shrink-0 flex flex-col gap-1">
-                            {(j.status === "queued" || j.status === "running") ? (
-                              <button
-                                className="text-xs px-2 py-1 border rounded hover:bg-accent"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  cancelJob(j.id);
-                                }}
-                              >
-                                Cancel
-                              </button>
-                            ) : (
-                              <button
-                                className="text-xs px-2 py-1 border rounded hover:bg-accent"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  cancelJob(j.id);
-                                }}
-                                title="Delete this job + images"
-                              >
-                                Delete
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </section>
         </div>
 
         <Modal
           open={galleryOpen}
-          title="Sticker Pack"
-          description={galleryJobId ? `Job ${galleryJobId.slice(0, 8)} • ${job?.completed ?? 0}/${job?.total ?? 0}` : ""}
-          onClose={() => setGalleryOpen(false)}
+          title="Gallery"
+          description={
+            galleryJobId
+              ? `Job ${galleryJobId.slice(0, 8)} • ${galleryJob?.completed ?? 0}/${galleryJob?.total ?? 0} • ${galleryJob?.status ?? ""}`
+              : "Browse past generations"
+          }
+          onClose={() => {
+            setGalleryOpen(false);
+          }}
         >
           <div className="space-y-3">
-            <div className="flex gap-2">
-              <button
-                className="px-3 py-2 text-sm border rounded hover:bg-accent disabled:opacity-50"
-                disabled={!galleryJobId || downloading}
-                onClick={() => (galleryJobId ? downloadJobZip(galleryJobId) : undefined)}
-              >
-                {downloading ? "Zipping…" : "Download zip"}
-              </button>
-              {galleryJobId ? (
-                <button
-                  className="px-3 py-2 text-sm border rounded hover:bg-accent"
-                  onClick={() => cancelJob(galleryJobId)}
-                >
-                  {job?.status === "queued" || job?.status === "running" ? "Cancel/Delete" : "Delete"}
-                </button>
-              ) : null}
-            </div>
-            <div className="grid grid-cols-4 gap-2">
-              {stickers
-                .slice()
-                .sort((a, b) => a.subject.localeCompare(b.subject))
-                .map((s) => (
-                  <div key={s.id} className="border rounded overflow-hidden bg-background">
-                    {s.image_url ? (
-                      <img src={s.image_url} alt={s.subject} className="w-full h-24 object-cover" />
-                    ) : (
-                      <div className="w-full h-24 bg-muted/40 flex items-center justify-center text-[11px] text-muted-foreground">
-                        {s.status}
-                      </div>
-                    )}
-                    <div className="p-2 text-[11px] truncate" title={s.subject}>
-                      {s.subject}
-                    </div>
+            {galleryJobId ? (
+              <>
+                <div className="flex flex-wrap gap-2 items-center justify-between">
+                  <button
+                    className="px-3 py-2 text-sm border rounded hover:bg-accent"
+                    onClick={() => {
+                      setGalleryJobId(null);
+                      setGalleryJob(null);
+                      setGalleryStickers([]);
+                    }}
+                  >
+                    Back to jobs
+                  </button>
+
+                  <div className="flex gap-2">
+                    <button
+                      className="px-3 py-2 text-sm border rounded hover:bg-accent disabled:opacity-50"
+                      disabled={!galleryJobId || downloading}
+                      onClick={() => (galleryJobId ? downloadJobZip(galleryJobId) : undefined)}
+                    >
+                      {downloading ? "Zipping…" : "Download zip"}
+                    </button>
+                    <button
+                      className="px-3 py-2 text-sm border rounded hover:bg-accent"
+                      onClick={() => cancelJob(galleryJobId)}
+                    >
+                      {galleryJob?.status === "queued" || galleryJob?.status === "running" ? "Cancel/Delete" : "Delete"}
+                    </button>
                   </div>
-                ))}
-            </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {galleryStickers
+                    .slice()
+                    .sort((a, b) => a.subject.localeCompare(b.subject))
+                    .map((s) => (
+                      <div key={s.id} className="border rounded overflow-hidden bg-background">
+                        {s.image_url ? (
+                          <img src={s.image_url} alt={s.subject} className="w-full h-24 object-cover" />
+                        ) : (
+                          <div className="w-full h-24 bg-muted/40 flex items-center justify-center text-[11px] text-muted-foreground">
+                            {s.status}
+                          </div>
+                        )}
+                        <div className="p-2 text-[11px] truncate" title={s.subject}>
+                          {s.subject}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </>
+            ) : (
+              <div className="space-y-2">
+                {jobs.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No jobs yet.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {jobs.map((j) => {
+                      const cover = jobCovers[j.id];
+                      const styleName = styles.find((s) => s.id === j.style_id)?.name ?? "Style";
+                      const listName = subjectLists.find((l) => l.id === j.subject_list_id)?.name ?? "Subjects";
+                      return (
+                        <div
+                          key={j.id}
+                          className="border rounded-lg overflow-hidden bg-background hover:bg-accent/30 cursor-pointer"
+                          onClick={async () => {
+                            setGalleryJobId(j.id);
+                            setGalleryOpen(true);
+                            await loadGalleryJob(j.id);
+                          }}
+                        >
+                          <div className="flex gap-3 p-2">
+                            <div className="w-14 h-14 rounded border bg-muted/30 overflow-hidden shrink-0">
+                              {cover ? (
+                                <img src={cover} alt="cover" className="w-14 h-14 object-cover" />
+                              ) : (
+                                <div className="w-14 h-14 flex items-center justify-center text-[10px] text-muted-foreground">
+                                  {j.status}
+                                </div>
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-medium truncate">{styleName}</div>
+                              <div className="text-xs text-muted-foreground truncate">{listName}</div>
+                              <div className="text-xs text-muted-foreground mt-1">
+                                {j.completed}/{j.total} • {j.status}
+                              </div>
+                            </div>
+                            <div className="shrink-0 flex flex-col gap-1">
+                              {(j.status === "queued" || j.status === "running") ? (
+                                <button
+                                  className="text-xs px-2 py-1 border rounded hover:bg-accent"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    cancelJob(j.id);
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              ) : (
+                                <button
+                                  className="text-xs px-2 py-1 border rounded hover:bg-accent"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    cancelJob(j.id);
+                                  }}
+                                  title="Delete this job + images"
+                                >
+                                  Delete
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </Modal>
 
