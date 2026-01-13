@@ -253,7 +253,7 @@ Deno.serve(async (req: Request) => {
     // Validate style exists
     const { data: styleRow, error: styleErr } = await supabase
       .from("sticker_styles")
-      .select("id")
+      .select("id, compiled_template")
       .eq("id", styleId)
       .maybeSingle();
     if (styleErr) {
@@ -266,23 +266,63 @@ Deno.serve(async (req: Request) => {
       return json({ error: "Style not found" }, { status: 404, headers: corsHeaders(req) });
     }
 
+    const promptJson = {
+      version: 1,
+      styleId,
+      subjectListId,
+      // Stored as a JSON prompt "base" template. The worker injects a per-sticker subject at runtime.
+      template: (styleRow as any).compiled_template ?? null,
+      subjects: subjectStrings,
+    };
+
     // Create job
-    const { data: jobRow, error: jobErr } = await supabase
-      .from("sticker_jobs")
-      .insert({
-        style_id: styleId,
-        subject_list_id: subjectListId,
-        total: subjectStrings.length,
-        completed: 0,
-        status: "queued",
-      })
-      .select("id,total")
-      .single();
+    // NOTE: `prompt_json` is a newer column. If the migration hasn't been applied yet,
+    // the insert will fail. Gracefully fall back to creating the job without it.
+    let jobRow: any | null = null;
+    let jobErr: any | null = null;
+    {
+      const res = await supabase
+        .from("sticker_jobs")
+        .insert({
+          style_id: styleId,
+          subject_list_id: subjectListId,
+          total: subjectStrings.length,
+          completed: 0,
+          status: "queued",
+          prompt_json: promptJson,
+        })
+        .select("id,total")
+        .single();
+      jobRow = res.data as any;
+      jobErr = res.error as any;
+    }
     if (jobErr) {
-      return json(
-        { error: "Failed to create job", detail: jobErr.message },
-        { status: 500, headers: corsHeaders(req) },
-      );
+      const msg = String(jobErr?.message ?? "");
+      if (msg.toLowerCase().includes("prompt_json")) {
+        const res2 = await supabase
+          .from("sticker_jobs")
+          .insert({
+            style_id: styleId,
+            subject_list_id: subjectListId,
+            total: subjectStrings.length,
+            completed: 0,
+            status: "queued",
+          })
+          .select("id,total")
+          .single();
+        if (res2.error) {
+          return json(
+            { error: "Failed to create job", detail: res2.error.message },
+            { status: 500, headers: corsHeaders(req) },
+          );
+        }
+        jobRow = res2.data as any;
+      } else {
+        return json(
+          { error: "Failed to create job", detail: jobErr.message },
+          { status: 500, headers: corsHeaders(req) },
+        );
+      }
     }
 
     // Create stickers

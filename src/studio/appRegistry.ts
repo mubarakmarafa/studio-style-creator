@@ -1,5 +1,5 @@
 import type React from "react";
-import { Construction, Package, Wand2 } from "lucide-react";
+import { Layers, LayoutGrid, Package, Wand2 } from "lucide-react";
 
 export type StudioApp = {
   id: string;
@@ -20,6 +20,24 @@ export const STUDIO_APPS: StudioApp[] = [
     navTo: "/style-builder/projects",
     icon: Wand2,
     loader: () => import("@/apps/styleBuilder/StyleBuilderRouterApp"),
+  },
+  {
+    id: "module-forge",
+    title: "Module Forge",
+    description: "Create reusable layout modules and content modules for templates.",
+    route: "/module-forge/*",
+    navTo: "/module-forge/library",
+    icon: Layers,
+    loader: () => import("@/apps/moduleForge/ModuleForgeRouterApp"),
+  },
+  {
+    id: "template-assembler",
+    title: "Template Assembler",
+    description: "Assemble templates from modules → enumerate combinations → batch-generate outputs.",
+    route: "/template-assembler/*",
+    navTo: "/template-assembler/assemblies",
+    icon: LayoutGrid,
+    loader: () => import("@/apps/templateAssembler/TemplateAssemblerRouterApp"),
   },
   {
     id: "pack-creator",
@@ -43,31 +61,19 @@ export const WIP_STUDIO_APPS: WipStudioApp[] = [
     id: "handwriting-synthesiser",
     title: "Handwriting Synthesiser",
     description: "Generate and refine handwriting styles for use across packs and templates.",
-    icon: Construction,
-  },
-  {
-    id: "template-module-forge",
-    title: "Template Module Forge",
-    description: "Create reusable template modules with consistent styling and constraints.",
-    icon: Construction,
-  },
-  {
-    id: "template-assembler",
-    title: "Template Assembler",
-    description: "Assemble templates from modules to quickly produce consistent layouts.",
-    icon: Construction,
+    icon: Layers,
   },
   {
     id: "colour-palette-discoverer",
     title: "Colour Palette Discoverer",
     description: "Explore and save colour palettes tailored to a target aesthetic.",
-    icon: Construction,
+    icon: LayoutGrid,
   },
   {
     id: "prompt-pack-writer",
     title: "Prompt Pack Writer",
     description: "Draft and organize prompt packs for repeatable generation workflows.",
-    icon: Construction,
+    icon: Layers,
   },
 ];
 

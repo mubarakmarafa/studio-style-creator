@@ -31,6 +31,7 @@ type StickerJob = {
   completed: number;
   status: "queued" | "running" | "done" | "error" | "cancelled";
   error: string | null;
+  prompt_json?: unknown | null;
   created_at?: string;
 };
 
@@ -72,6 +73,7 @@ export default function PackCreatorApp() {
   const [galleryJobId, setGalleryJobId] = useState<string | null>(null);
   const [galleryJob, setGalleryJob] = useState<StickerJob | null>(null);
   const [galleryStickers, setGalleryStickers] = useState<StickerRow[]>([]);
+  const [galleryPromptCopied, setGalleryPromptCopied] = useState(false);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const pollRef = useRef<number | null>(null);
   const workerKickRef = useRef<number | null>(null);
@@ -590,12 +592,33 @@ export default function PackCreatorApp() {
   }
 
   async function loadJob(jobId: string) {
-    const { data: j, error: jErr } = await supabase
-      .from("sticker_jobs")
-      .select("id,style_id,subject_list_id,total,completed,status,error,created_at")
-      .eq("id", jobId)
-      .maybeSingle();
-    if (jErr) throw jErr;
+    // NOTE: `prompt_json` is a newer column. If the migration hasn't been applied yet,
+    // selecting it will fail and break the Gallery/job view. Gracefully fall back.
+    let j: any | null = null;
+    let jErr: any | null = null;
+    {
+      const res = await supabase
+        .from("sticker_jobs")
+        .select("id,style_id,subject_list_id,total,completed,status,error,created_at,prompt_json")
+        .eq("id", jobId)
+        .maybeSingle();
+      j = res.data as any;
+      jErr = res.error as any;
+    }
+    if (jErr) {
+      const msg = String(jErr?.message ?? "");
+      if (msg.toLowerCase().includes("prompt_json")) {
+        const res2 = await supabase
+          .from("sticker_jobs")
+          .select("id,style_id,subject_list_id,total,completed,status,error,created_at")
+          .eq("id", jobId)
+          .maybeSingle();
+        if (res2.error) throw res2.error;
+        j = res2.data as any;
+      } else {
+        throw jErr;
+      }
+    }
     if (!j) throw new Error("Job not found");
     setJob(j as any);
     try {
@@ -614,12 +637,32 @@ export default function PackCreatorApp() {
   }
 
   async function loadGalleryJob(jobId: string) {
-    const { data: j, error: jErr } = await supabase
-      .from("sticker_jobs")
-      .select("id,style_id,subject_list_id,total,completed,status,error,created_at")
-      .eq("id", jobId)
-      .maybeSingle();
-    if (jErr) throw jErr;
+    // Same fallback logic as `loadJob` (see comment there).
+    let j: any | null = null;
+    let jErr: any | null = null;
+    {
+      const res = await supabase
+        .from("sticker_jobs")
+        .select("id,style_id,subject_list_id,total,completed,status,error,created_at,prompt_json")
+        .eq("id", jobId)
+        .maybeSingle();
+      j = res.data as any;
+      jErr = res.error as any;
+    }
+    if (jErr) {
+      const msg = String(jErr?.message ?? "");
+      if (msg.toLowerCase().includes("prompt_json")) {
+        const res2 = await supabase
+          .from("sticker_jobs")
+          .select("id,style_id,subject_list_id,total,completed,status,error,created_at")
+          .eq("id", jobId)
+          .maybeSingle();
+        if (res2.error) throw res2.error;
+        j = res2.data as any;
+      } else {
+        throw jErr;
+      }
+    }
     if (!j) throw new Error("Job not found");
     setGalleryJob(j as any);
 
@@ -1162,6 +1205,7 @@ export default function PackCreatorApp() {
           }
           onClose={() => {
             setGalleryOpen(false);
+            setGalleryPromptCopied(false);
           }}
         >
           <div className="space-y-3">
@@ -1174,12 +1218,30 @@ export default function PackCreatorApp() {
                       setGalleryJobId(null);
                       setGalleryJob(null);
                       setGalleryStickers([]);
+                      setGalleryPromptCopied(false);
                     }}
                   >
                     Back to jobs
                   </button>
 
                   <div className="flex gap-2">
+                    <button
+                      className="px-3 py-2 text-sm border rounded hover:bg-accent disabled:opacity-50"
+                      disabled={!galleryJob?.prompt_json}
+                      title={galleryJob?.prompt_json ? "Copy the JSON prompt used to generate this pack" : "No prompt JSON stored for this job"}
+                      onClick={async () => {
+                        try {
+                          if (!galleryJob?.prompt_json) return;
+                          await navigator.clipboard.writeText(JSON.stringify(galleryJob.prompt_json, null, 2));
+                          setGalleryPromptCopied(true);
+                          window.setTimeout(() => setGalleryPromptCopied(false), 1200);
+                        } catch (e) {
+                          setErr(e instanceof Error ? e.message : String(e));
+                        }
+                      }}
+                    >
+                      {galleryPromptCopied ? "Copied!" : "Copy JSON"}
+                    </button>
                     <button
                       className="px-3 py-2 text-sm border rounded hover:bg-accent disabled:opacity-50"
                       disabled={!galleryJobId || downloading}
@@ -1233,6 +1295,7 @@ export default function PackCreatorApp() {
                           onClick={async () => {
                             setGalleryJobId(j.id);
                             setGalleryOpen(true);
+                            setGalleryPromptCopied(false);
                             await loadGalleryJob(j.id);
                           }}
                         >

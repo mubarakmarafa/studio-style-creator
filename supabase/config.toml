@@ -9,4 +9,7 @@ verify_jwt = false
 [functions.sticker-worker]
 verify_jwt = false
 
+[functions.template-pdf-render]
+verify_jwt = false
+
 

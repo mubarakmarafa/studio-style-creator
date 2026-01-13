@@ -1,18 +1,22 @@
 import { useEffect, useId, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
+type ModalSize = "md" | "lg" | "xl";
+
 export function Modal({
   open,
   title,
   description,
   children,
   onClose,
+  size = "md",
 }: {
   open: boolean;
   title: string;
   description?: string;
   children: ReactNode;
   onClose: () => void;
+  size?: ModalSize;
 }) {
   const titleId = useId();
   const descId = useId();
@@ -37,6 +41,13 @@ export function Modal({
 
   if (!open) return null;
 
+  const sizeClass =
+    size === "xl"
+      ? "w-[min(1120px,calc(100vw-2rem))]"
+      : size === "lg"
+        ? "w-[min(920px,calc(100vw-2rem))]"
+        : "w-[min(720px,calc(100vw-2rem))]";
+
   return createPortal(
     <div
       className="fixed inset-0 z-[1000] flex items-center justify-center"
@@ -50,7 +61,7 @@ export function Modal({
       }}
     >
       <div className="absolute inset-0 bg-black/40" />
-      <div className="relative w-[min(720px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-auto rounded-xl border bg-background shadow-xl">
+      <div className={`relative ${sizeClass} max-h-[calc(100vh-2rem)] overflow-auto rounded-xl border bg-background shadow-xl`}>
         <div className="p-4 border-b">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
