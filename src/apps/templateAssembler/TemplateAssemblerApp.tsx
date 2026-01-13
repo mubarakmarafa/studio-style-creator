@@ -202,16 +202,86 @@ export default function TemplateAssemblerApp() {
         .order("updated_at", { ascending: false });
       if (error) throw error;
       const rows = (data ?? []) as any[];
-      setLayouts(
-        rows
-          .filter((r) => r.kind === "layout")
-          .map((r) => ({ id: String(r.id), kind: "layout" as const, name: String(r.name ?? ""), spec_json: r.spec_json })),
-      );
-      setModules(
-        rows
-          .filter((r) => r.kind === "module")
-          .map((r) => ({ id: String(r.id), kind: "module" as const, name: String(r.name ?? ""), spec_json: r.spec_json })),
-      );
+      const nextLayouts = rows
+        .filter((r) => r.kind === "layout")
+        .map((r) => ({ id: String(r.id), kind: "layout" as const, name: String(r.name ?? ""), spec_json: r.spec_json }));
+      const nextModules = rows
+        .filter((r) => r.kind === "module")
+        .map((r) => ({ id: String(r.id), kind: "module" as const, name: String(r.name ?? ""), spec_json: r.spec_json }));
+      setLayouts(nextLayouts);
+      setModules(nextModules);
+
+      // Also refresh existing generated previews by re-assembling with the latest module specs.
+      // We extract the current filled text from the assembled spec so the preview can be updated
+      // without having to re-run generation (or AI fill).
+      setGeneratedTemplates((prev) => {
+        if (!prev.length) return prev;
+
+        function slotRectsFromLayoutSpec(layoutSpec: any): Record<string, any> {
+          const els = Array.isArray(layoutSpec?.elements) ? layoutSpec.elements : [];
+          const slotRects: Record<string, any> = {};
+          for (const e of els) {
+            if (String(e?.type ?? "") !== "Slot") continue;
+            const slotKey = String(e?.props?.slotKey ?? "").trim();
+            if (!slotKey) continue;
+            slotRects[slotKey] = { rect: e.rect };
+          }
+          return slotRects;
+        }
+
+        function extractOverridesFromAssembledSpec(
+          assembledSpec: any,
+          mapping: Record<string, string>,
+        ): Record<string, SlotTextOverride> {
+          const out: Record<string, SlotTextOverride> = {};
+          const els = Array.isArray(assembledSpec?.elements) ? assembledSpec.elements : [];
+          for (const [slotKey, moduleId] of Object.entries(mapping)) {
+            const key = `${slotKey}|${moduleId}`;
+            const slotEls = els
+              .filter((e: any) => String(e?.props?.__slotKey ?? "") === String(slotKey))
+              .slice()
+              .sort((a: any, b: any) => {
+                const ay = Number(a?.rect?.y ?? 0);
+                const by = Number(b?.rect?.y ?? 0);
+                if (ay !== by) return ay - by;
+                const ax = Number(a?.rect?.x ?? 0);
+                const bx = Number(b?.rect?.x ?? 0);
+                if (ax !== bx) return ax - bx;
+                return (Number(a?.zIndex ?? 0) || 0) - (Number(b?.zIndex ?? 0) || 0);
+              });
+            const headers: string[] = [];
+            const titles: string[] = [];
+            const bodies: string[] = [];
+            for (const e of slotEls) {
+              const t = String(e?.type ?? "");
+              const text = String(e?.props?.text ?? "").trim();
+              if (!text) continue;
+              if (t === "Header") headers.push(text);
+              else if (t === "Title") titles.push(text);
+              else if (t === "BodyText") bodies.push(text);
+            }
+            if (headers.length || titles.length || bodies.length) out[key] = { headers, titles, bodies };
+          }
+          return out;
+        }
+
+        const rebuilt = prev.map((t) => {
+          const l = nextLayouts.find((x) => x.id === t.layoutId);
+          const layoutSpec = (l as any)?.spec_json ?? null;
+          if (!layoutSpec) return t;
+          const slotRects = slotRectsFromLayoutSpec(layoutSpec);
+          const overrides = extractOverridesFromAssembledSpec(t.template_spec_json, t.mapping);
+          return {
+            ...t,
+            layoutName: l?.name || t.layoutName,
+            template_spec_json: assembleTemplateSpec(layoutSpec, slotRects, t.mapping, null, overrides),
+          };
+        });
+
+        // PDFs are now stale relative to the updated template specs.
+        setPdfPreviewByIdx({});
+        return rebuilt;
+      });
     } catch (e) {
       // Non-fatal; show in main error area
       setErr(e instanceof Error ? e.message : String(e));
@@ -708,17 +778,19 @@ export default function TemplateAssemblerApp() {
       const boundsY = any ? minY : 0;
       const boundsW = Math.max(1, any ? maxX - minX : Number(modSpec?.canvas?.w ?? 1) || 1);
       const boundsH = Math.max(1, any ? maxY - minY : Number(modSpec?.canvas?.h ?? 1) || 1);
-      const scale = Math.min(Number(slotRect?.w ?? 1) / boundsW, Number(slotRect?.h ?? 1) / boundsH);
-      const baseX = Number(slotRect?.x ?? 0) + (Number(slotRect?.w ?? 1) - boundsW * scale) / 2 - boundsX * scale;
-      const baseY = Number(slotRect?.y ?? 0) + (Number(slotRect?.h ?? 1) - boundsH * scale) / 2 - boundsY * scale;
+      // Fill the slot by default (no letterboxing). This matches how we assemble modules into slots.
+      const scaleX = Number(slotRect?.w ?? 1) / boundsW;
+      const scaleY = Number(slotRect?.h ?? 1) / boundsH;
+      const baseX = Number(slotRect?.x ?? 0) - boundsX * scaleX;
+      const baseY = Number(slotRect?.y ?? 0) - boundsY * scaleY;
 
       return modEls
         .map((e) => {
           const r = e?.rect ?? {};
-          const nx = baseX + (Number(r?.x ?? 0) || 0) * scale;
-          const ny = baseY + (Number(r?.y ?? 0) || 0) * scale;
-          const nw = (Number(r?.w ?? 0) || 0) * scale;
-          const nh = (Number(r?.h ?? 0) || 0) * scale;
+          const nx = baseX + (Number(r?.x ?? 0) || 0) * scaleX;
+          const ny = baseY + (Number(r?.y ?? 0) || 0) * scaleY;
+          const nw = (Number(r?.w ?? 0) || 0) * scaleX;
+          const nh = (Number(r?.h ?? 0) || 0) * scaleY;
           return { type: String(e?.type ?? ""), rect: { x: nx, y: ny, w: nw, h: nh } };
         })
         .filter((e) => e.rect.w > 0 && e.rect.h > 0);
@@ -948,6 +1020,43 @@ export default function TemplateAssemblerApp() {
         continue;
       }
 
+      if (type === "Pattern") {
+        const variant = String(props?.variant ?? "grid").toLowerCase();
+        const stroke = escapeXml(String(props?.stroke ?? "#e5e7eb"));
+        const outline = Boolean(props?.outline ?? false);
+        const outlineThickness = Math.max(0, Number(props?.outlineThickness ?? 2) || 0);
+        const spacing = Math.max(6, Number(props?.spacing ?? (variant === "dots" ? 12 : variant === "grid" ? 16 : 16)) || 16);
+
+        if (variant === "lines") {
+          for (let gy = y + spacing; gy < y + h; gy += spacing) {
+            svgEls.push(`<line x1="${x}" y1="${gy}" x2="${x + w}" y2="${gy}" stroke="${stroke}" stroke-width="1" />`);
+          }
+        } else if (variant === "grid") {
+          for (let gx = x + spacing; gx < x + w; gx += spacing) {
+            svgEls.push(`<line x1="${gx}" y1="${y}" x2="${gx}" y2="${y + h}" stroke="${stroke}" stroke-width="1" />`);
+          }
+          for (let gy = y + spacing; gy < y + h; gy += spacing) {
+            svgEls.push(`<line x1="${x}" y1="${gy}" x2="${x + w}" y2="${gy}" stroke="${stroke}" stroke-width="1" />`);
+          }
+        } else if (variant === "dots") {
+          const r = 1.2;
+          for (let gx = x + spacing / 2; gx < x + w; gx += spacing) {
+            for (let gy = y + spacing / 2; gy < y + h; gy += spacing) {
+              svgEls.push(`<circle cx="${gx}" cy="${gy}" r="${r}" fill="${stroke}" />`);
+            }
+          }
+        } else {
+          // blank
+        }
+
+        if (outline && outlineThickness > 0) {
+          svgEls.push(
+            `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="none" stroke="${stroke}" stroke-width="${outlineThickness}" />`,
+          );
+        }
+        continue;
+      }
+
       if (type === "Divider") {
         const stroke = escapeXml(String(props?.stroke ?? "#e5e7eb"));
         const thickness = Math.max(1, Number(props?.thickness ?? 2) || 2);
@@ -977,6 +1086,9 @@ export default function TemplateAssemblerApp() {
         const rawText = String(props?.text ?? type);
         const fontSize = Math.max(8, Number(props?.fontSize ?? (type === "BodyText" ? 12 : 24)) || 12);
         const lineHeight = Math.max(1, Number(props?.lineHeight ?? 1.35) || 1.35);
+        const fontWeight = Number(props?.fontWeight ?? (type === "Header" ? 700 : 400)) || (type === "Header" ? 700 : 400);
+        const align = String(props?.textAlign ?? "left").toLowerCase();
+        const anchor = align === "center" ? "middle" : align === "right" ? "end" : "start";
         const pad = 6;
         const maxW = Math.max(0, w - pad * 2);
         const lines = wrapTextToWidth(rawText, maxW, fontSize).slice(0, 200); // safety cap
@@ -989,11 +1101,12 @@ export default function TemplateAssemblerApp() {
         const tspans = lines
           .map((ln, i) => {
             const ly = y + pad + fontSize + i * fontSize * lineHeight;
-            return `<tspan x="${x + pad}" y="${ly}">${escapeXml(ln)}</tspan>`;
+            const lx = align === "center" ? x + w / 2 : align === "right" ? x + w - pad : x + pad;
+            return `<tspan x="${lx}" y="${ly}">${escapeXml(ln)}</tspan>`;
           })
           .join("");
 
-        const textEl = `<text font-size="${fontSize}" fill="#111827">${tspans}</text>`;
+        const textEl = `<text font-size="${fontSize}" font-weight="${fontWeight}" text-anchor="${anchor}" fill="#111827">${tspans}</text>`;
         svgEls.push(w > 0 && h > 0 ? `<g clip-path="url(#${clipId})">${textEl}</g>` : textEl);
         continue;
       }
@@ -1079,6 +1192,8 @@ export default function TemplateAssemblerApp() {
         const pad = Math.max(6, Math.min(18, Math.min(slotRect.w, slotRect.h) * 0.06));
         const innerW = Math.max(1, slotRect.w - pad * 2);
         const headerH = Math.max(24, Math.min(44, slotRect.h * 0.22));
+        // Ensure the header text actually fits in the header box (avoid clipping in SVG/PDF).
+        const headerFontSize = Math.max(12, Math.min(28, headerH - pad * 2 - 2));
         const dividerH = 2;
         const gap = Math.max(6, pad * 0.6);
         const bodyY = slotRect.y + pad + headerH + gap + dividerH + gap;
@@ -1094,8 +1209,9 @@ export default function TemplateAssemblerApp() {
           props: {
             __slotKey: slotKey,
             text: headerText,
-            fontSize: 24,
+            fontSize: headerFontSize,
             color: "#111827",
+            lineHeight: 1.2,
           },
         });
         outEls.push({
@@ -1123,13 +1239,126 @@ export default function TemplateAssemblerApp() {
         continue;
       }
 
+      // If this module is a stack-layout module (Header/Title/BodyText/Divider/Pattern only),
+      // we can honor `layoutPreset: fit` by computing heights from the filled text before scaling into the slot.
+      const stackableTypes = new Set(["Header", "Title", "BodyText", "Divider", "Pattern"]);
+      const isStackModule =
+        modEls.length > 0 &&
+        modEls.every((e: any) => stackableTypes.has(String(e?.type ?? ""))) &&
+        Number.isFinite(Number(modSpec?.canvas?.w ?? NaN)) &&
+        Number.isFinite(Number(modSpec?.canvas?.h ?? NaN));
+
+      const canvasW = Number(modSpec?.canvas?.w ?? 1) || 1;
+      const canvasH = Number(modSpec?.canvas?.h ?? 1) || 1;
+      const STACK_PAD = 24;
+      const STACK_GAP = 12;
+      const TEXT_PAD = 6;
+
+      function presetOf(e: any): "fixed" | "fill" | "fit" {
+        const p = String(e?.props?.layoutPreset ?? "").toLowerCase();
+        if (p === "fill") return "fill";
+        if (p === "fit") return "fit";
+        return "fixed";
+      }
+
+      function fittedHeightFor(e: any, tmp: { header: number; title: number; body: number }, innerW: number): number {
+        const type = String(e?.type ?? "");
+        const props = e?.props ?? {};
+        const preset = presetOf(e);
+        if (preset !== "fit") return Math.max(1, Number(e?.rect?.h ?? 40) || 40);
+        if (type === "Divider") return Math.max(1, Number(props?.thickness ?? 2) || 2);
+        if (type === "Pattern") {
+          const spacing = Math.max(6, Number(props?.spacing ?? 16) || 16);
+          return Math.max(24, spacing * 6);
+        }
+        const maxW = Math.max(0, innerW - TEXT_PAD * 2);
+        if (type === "Header") {
+          const text = String(overrides?.[`${slotKey}|${moduleId}`]?.headers?.[tmp.header] ?? headerPlaceholder(tmp.header));
+          tmp.header++;
+          const fontSize = Math.max(8, Number(props?.fontSize ?? 24) || 24);
+          const lineHeight = Math.max(1, Number(props?.lineHeight ?? 1.2) || 1.2);
+          const lines = wrapTextToWidth(text, maxW, fontSize).slice(0, 200);
+          return Math.max(18, TEXT_PAD * 2 + lines.length * fontSize * lineHeight);
+        }
+        if (type === "Title") {
+          const text = String(
+            overrides?.[`${slotKey}|${moduleId}`]?.titles?.[tmp.title] ??
+              (topic ? titleCase(topic) : tmp.title === 0 ? "This is a title" : "This is another title"),
+          );
+          tmp.title++;
+          const fontSize = Math.max(8, Number(props?.fontSize ?? 18) || 18);
+          const lineHeight = Math.max(1, Number(props?.lineHeight ?? 1.25) || 1.25);
+          const lines = wrapTextToWidth(text, maxW, fontSize).slice(0, 200);
+          return Math.max(18, TEXT_PAD * 2 + lines.length * fontSize * lineHeight);
+        }
+        if (type === "BodyText") {
+          const text = String(overrides?.[`${slotKey}|${moduleId}`]?.bodies?.[tmp.body] ?? bodyPlaceholder(tmp.body));
+          tmp.body++;
+          const fontSize = Math.max(8, Number(props?.fontSize ?? 12) || 12);
+          const lineHeight = Math.max(1, Number(props?.lineHeight ?? 1.35) || 1.35);
+          const lines = wrapTextToWidth(text, maxW, fontSize).slice(0, 200);
+          return Math.max(18, TEXT_PAD * 2 + lines.length * fontSize * lineHeight);
+        }
+        return Math.max(1, Number(e?.rect?.h ?? 40) || 40);
+      }
+
+      let sourceEls: any[] = modEls;
+      if (isStackModule) {
+        const innerW = Math.max(1, canvasW - STACK_PAD * 2);
+        const innerH = Math.max(1, canvasH - STACK_PAD * 2);
+        const sorted = modEls.slice().sort((a: any, b: any) => (Number(a?.zIndex ?? 0) || 0) - (Number(b?.zIndex ?? 0) || 0));
+
+        const tmp = { header: 0, title: 0, body: 0 };
+        const fixedHeights: number[] = [];
+        const fillIdx: number[] = [];
+        for (let i = 0; i < sorted.length; i++) {
+          const e = sorted[i];
+          const preset = presetOf(e);
+          if (preset === "fill") {
+            fillIdx.push(i);
+            fixedHeights.push(0);
+            continue;
+          }
+          if (preset === "fit") {
+            fixedHeights.push(fittedHeightFor(e, tmp, innerW));
+            continue;
+          }
+          if (String(e?.type ?? "") === "Divider") {
+            fixedHeights.push(Math.max(1, Number(e?.props?.thickness ?? 2) || 2));
+            continue;
+          }
+          fixedHeights.push(Math.max(1, Number(e?.rect?.h ?? 40) || 40));
+        }
+        const gapsTotal = sorted.length > 0 ? STACK_GAP * (sorted.length - 1) : 0;
+        const fixedTotal = fixedHeights.reduce((s, h) => s + h, 0);
+        const remaining = Math.max(1, innerH - gapsTotal - fixedTotal);
+        const fillH = fillIdx.length > 0 ? Math.max(1, remaining / fillIdx.length) : 0;
+
+        let yCursor = STACK_PAD;
+        sourceEls = sorted.map((e: any, i: number) => {
+          const preset = presetOf(e);
+          const type = String(e?.type ?? "");
+          const h =
+            preset === "fill"
+              ? fillH
+              : preset === "fit"
+                ? fixedHeights[i]
+                : type === "Divider"
+                  ? Math.max(1, Number(e?.props?.thickness ?? 2) || 2)
+                  : fixedHeights[i];
+          const out = { ...e, rect: { x: STACK_PAD, y: yCursor, w: innerW, h } };
+          yCursor += h + STACK_GAP;
+          return out;
+        });
+      }
+
       // Compute module content bounds (canvas is editor-only; modules should scale to fit slots).
       let minX = Number.POSITIVE_INFINITY;
       let minY = Number.POSITIVE_INFINITY;
       let maxX = Number.NEGATIVE_INFINITY;
       let maxY = Number.NEGATIVE_INFINITY;
       let any = false;
-      for (const e of modEls) {
+      for (const e of sourceEls) {
         const r = e?.rect ?? {};
         const x = Number(r?.x ?? 0);
         const y = Number(r?.y ?? 0);
@@ -1148,16 +1377,20 @@ export default function TemplateAssemblerApp() {
       const boundsW = Math.max(1, any ? maxX - minX : Number(modSpec?.canvas?.w ?? 1) || 1);
       const boundsH = Math.max(1, any ? maxY - minY : Number(modSpec?.canvas?.h ?? 1) || 1);
 
-      const scale = Math.min(slotRect.w / boundsW, slotRect.h / boundsH);
-      const baseX = slotRect.x + (slotRect.w - boundsW * scale) / 2 - boundsX * scale;
-      const baseY = slotRect.y + (slotRect.h - boundsH * scale) / 2 - boundsY * scale;
+      // Default behavior: modules should occupy the full slot area (no letterboxing).
+      // We intentionally allow non-uniform scaling to avoid cropping.
+      const scaleX = slotRect.w / boundsW;
+      const scaleY = slotRect.h / boundsH;
+      const scaleText = Math.max(0.01, Math.min(scaleX, scaleY));
+      const baseX = slotRect.x - boundsX * scaleX;
+      const baseY = slotRect.y - boundsY * scaleY;
 
-      for (const e of modEls) {
+      for (const e of sourceEls) {
         const rect = e?.rect ?? {};
-        const nx = baseX + (Number(rect?.x ?? 0) || 0) * scale;
-        const ny = baseY + (Number(rect?.y ?? 0) || 0) * scale;
-        const nw = (Number(rect?.w ?? 0) || 0) * scale;
-        const nh = (Number(rect?.h ?? 0) || 0) * scale;
+        const nx = baseX + (Number(rect?.x ?? 0) || 0) * scaleX;
+        const ny = baseY + (Number(rect?.y ?? 0) || 0) * scaleY;
+        const nw = (Number(rect?.w ?? 0) || 0) * scaleX;
+        const nh = (Number(rect?.h ?? 0) || 0) * scaleY;
         const type = String(e?.type ?? "");
 
         // Module BackgroundTexture should not fill the full page; treat it as a filled rect inside the slot region.
@@ -1175,9 +1408,35 @@ export default function TemplateAssemblerApp() {
         const baseProps: Record<string, any> = { ...(e?.props ?? {}), __slotKey: slotKey };
         const overrideKey = `${slotKey}|${moduleId}`;
         const o = overrides?.[overrideKey];
+        if (type === "Divider") {
+          const thickness = Math.max(1, Number(baseProps?.thickness ?? 2) || 2) * scaleY;
+          outEls.push({
+            ...e,
+            id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
+            rect: { x: nx, y: ny, w: nw, h: nh },
+            zIndex: z++,
+            props: { ...baseProps, thickness },
+          });
+          continue;
+        }
+        if (type === "Pattern") {
+          const spacing = Math.max(6, Number(baseProps?.spacing ?? 16) || 16) * scaleText;
+          const outlineThickness = Math.max(0, Number(baseProps?.outlineThickness ?? 2) || 0) * scaleText;
+          outEls.push({
+            ...e,
+            id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
+            rect: { x: nx, y: ny, w: nw, h: nh },
+            zIndex: z++,
+            props: { ...baseProps, spacing, outlineThickness },
+          });
+          continue;
+        }
         if (type === "Header") {
           const headerText = String(o?.headers?.[headerIdx] ?? headerPlaceholder(headerIdx));
           headerIdx++;
+          const fontSize = Math.max(8, Number(baseProps?.fontSize ?? 24) || 24) * scaleText;
+          const lineHeight = Math.max(1, Number(baseProps?.lineHeight ?? 1.2) || 1.2);
+          const color = String(baseProps?.color ?? "#111827");
           outEls.push({
             ...e,
             id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
@@ -1186,8 +1445,9 @@ export default function TemplateAssemblerApp() {
             props: {
               ...baseProps,
               text: headerText,
-              fontSize: 24,
-              color: "#111827",
+              fontSize,
+              lineHeight,
+              color,
             },
           });
           continue;
@@ -1198,6 +1458,9 @@ export default function TemplateAssemblerApp() {
               (topic ? titleCase(topic) : titleIdx === 0 ? "This is a title" : "This is another title"),
           );
           titleIdx++;
+          const fontSize = Math.max(8, Number(baseProps?.fontSize ?? 18) || 18) * scaleText;
+          const lineHeight = Math.max(1, Number(baseProps?.lineHeight ?? 1.25) || 1.25);
+          const color = String(baseProps?.color ?? "#111827");
           outEls.push({
             ...e,
             id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
@@ -1206,8 +1469,9 @@ export default function TemplateAssemblerApp() {
             props: {
               ...baseProps,
               text: titleText,
-              fontSize: 18,
-              color: "#111827",
+              fontSize,
+              lineHeight,
+              color,
             },
           });
           continue;
@@ -1215,6 +1479,9 @@ export default function TemplateAssemblerApp() {
         if (type === "BodyText") {
           const bodyText = String(o?.bodies?.[bodyIdx] ?? bodyPlaceholder(bodyIdx));
           bodyIdx++;
+          const fontSize = Math.max(8, Number(baseProps?.fontSize ?? 12) || 12) * scaleText;
+          const lineHeight = Math.max(1, Number(baseProps?.lineHeight ?? 1.35) || 1.35);
+          const color = String(baseProps?.color ?? "#111827");
           outEls.push({
             ...e,
             id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
@@ -1223,9 +1490,9 @@ export default function TemplateAssemblerApp() {
             props: {
               ...baseProps,
               text: bodyText,
-              fontSize: 12,
-              color: "#111827",
-              lineHeight: 1.35,
+              fontSize,
+              color,
+              lineHeight,
             },
           });
           continue;
@@ -1579,7 +1846,7 @@ export default function TemplateAssemblerApp() {
         {selectedTemplate ? (
           <div className="space-y-3">
             <div
-              className="w-full rounded border bg-white overflow-hidden max-h-[70vh] [&_svg]:w-full [&_svg]:h-auto"
+              className="w-full rounded border bg-white flex items-center justify-center p-2 [&_svg]:max-w-full [&_svg]:max-h-[70vh] [&_svg]:w-auto [&_svg]:h-auto"
               title="SVG preview"
               dangerouslySetInnerHTML={{ __html: selectedTemplateSvg }}
             />
