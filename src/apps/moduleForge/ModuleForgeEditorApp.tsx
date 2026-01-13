@@ -14,16 +14,18 @@ const DEFAULT_MODULE_CANVAS = { w: 640, h: 640, unit: "pt" as const };
 const MODULE_STACK_PADDING = 24;
 const MODULE_STACK_GAP = 12;
 
-type ModuleLayoutPreset = "fixed" | "fill";
+type ModuleLayoutPreset = "fixed" | "fill" | "fit";
 
 function isModuleStackableType(t: ModuleForgeElementType): boolean {
   // We only “stack-layout” these; everything else is considered legacy/non-stacked.
-  return t === "Header" || t === "Title" || t === "BodyText" || t === "Divider";
+  return t === "Header" || t === "Title" || t === "BodyText" || t === "Divider" || t === "Pattern";
 }
 
 function getLayoutPreset(e: ModuleForgeElement): ModuleLayoutPreset {
   const p = String(e.props?.layoutPreset ?? "").toLowerCase();
-  return p === "fill" ? "fill" : "fixed";
+  if (p === "fill") return "fill";
+  if (p === "fit") return "fit";
+  return "fixed";
 }
 
 function moduleStackLayout(
@@ -51,6 +53,21 @@ function moduleStackLayout(
     if (preset === "fill") {
       fillIdx.push(i);
       fixedHeights.push(0);
+      continue;
+    }
+    if (preset === "fit") {
+      // "fit" shrinks to a reasonable intrinsic height (real fit-to-text happens at assembly time).
+      if (e.type === "Divider") {
+        fixedHeights.push(Math.max(1, Number(e.props?.thickness ?? 2)));
+        continue;
+      }
+      if (e.type === "Pattern") {
+        const spacing = Math.max(6, Number(e.props?.spacing ?? 16) || 16);
+        fixedHeights.push(Math.max(24, Math.min(innerH, spacing * 6)));
+        continue;
+      }
+      // Text-ish defaults
+      fixedHeights.push(e.type === "Header" ? 44 : e.type === "Title" ? 36 : 72);
       continue;
     }
     if (e.type === "Divider") {
@@ -165,17 +182,29 @@ function elementDefaults(type: ModuleForgeElementType): Pick<ModuleForgeElement,
       return { rect: { x: 0, y: 0, w: 612, h: 792 }, props: { fill: "#f8fafc" } };
     case "GridLines":
       return { rect: { x: 0, y: 0, w: 612, h: 792 }, props: { cols: 6, rows: 8, stroke: "#e5e7eb" } };
+    case "Pattern":
+      return {
+        rect: { x: 48, y: 340, w: 516, h: 200 },
+        props: {
+          variant: "grid", // lines | grid | dots | blank
+          stroke: "#e5e7eb",
+          spacing: 16,
+          outline: false,
+          outlineThickness: 2,
+          layoutPreset: "fill",
+        },
+      };
     case "Header":
       return {
         rect: { x: 48, y: 48, w: 516, h: 44 },
-        props: { layoutPreset: "fixed" },
+        props: { layoutPreset: "fixed", fontSize: 24, fontWeight: 700, textAlign: "left", lineHeight: 1.2 },
       };
     case "Title":
       return { rect: { x: 48, y: 108, w: 516, h: 36 }, props: { layoutPreset: "fixed" } };
     case "BodyText":
       return {
         rect: { x: 48, y: 160, w: 516, h: 120 },
-        props: { layoutPreset: "fill" },
+        props: { layoutPreset: "fill", fontSize: 12, fontWeight: 400, textAlign: "left", lineHeight: 1.35 },
       };
     case "Divider":
       return { rect: { x: 48, y: 300, w: 516, h: 2 }, props: { stroke: "#e5e7eb", thickness: 2, layoutPreset: "fixed" } };
@@ -220,6 +249,45 @@ function renderSvgPreview(spec: ModuleForgeSpec): string {
         }
         return lines.join("");
       }
+      if (e.type === "Pattern") {
+        const variant = String(e.props?.variant ?? "grid").toLowerCase();
+        const stroke = String(e.props?.stroke ?? "#e5e7eb");
+        const outline = Boolean(e.props?.outline ?? false);
+        const outlineThickness = Math.max(0, Number(e.props?.outlineThickness ?? 2) || 0);
+        const spacing = Math.max(6, Number(e.props?.spacing ?? (variant === "dots" ? 12 : variant === "grid" ? 16 : 16)) || 16);
+
+        const parts: string[] = [];
+        // background (transparent) — patterns are drawn as strokes
+        if (variant === "lines") {
+          // Ruled paper: horizontal lines
+          for (let gy = ry + spacing; gy < ry + eh; gy += spacing) {
+            parts.push(`<line x1="${rx}" y1="${gy}" x2="${rx + ew}" y2="${gy}" stroke="${stroke}" stroke-width="1" />`);
+          }
+        } else if (variant === "grid") {
+          for (let gx = rx + spacing; gx < rx + ew; gx += spacing) {
+            parts.push(`<line x1="${gx}" y1="${ry}" x2="${gx}" y2="${ry + eh}" stroke="${stroke}" stroke-width="1" />`);
+          }
+          for (let gy = ry + spacing; gy < ry + eh; gy += spacing) {
+            parts.push(`<line x1="${rx}" y1="${gy}" x2="${rx + ew}" y2="${gy}" stroke="${stroke}" stroke-width="1" />`);
+          }
+        } else if (variant === "dots") {
+          const r = 1.2;
+          for (let gx = rx + spacing / 2; gx < rx + ew; gx += spacing) {
+            for (let gy = ry + spacing / 2; gy < ry + eh; gy += spacing) {
+              parts.push(`<circle cx="${gx}" cy="${gy}" r="${r}" fill="${stroke}" />`);
+            }
+          }
+        } else {
+          // blank: nothing
+        }
+
+        if (outline && outlineThickness > 0) {
+          parts.push(
+            `<rect x="${rx}" y="${ry}" width="${ew}" height="${eh}" fill="none" stroke="${stroke}" stroke-width="${outlineThickness}" />`,
+          );
+        }
+        return parts.join("");
+      }
       if (e.type === "Divider") {
         const stroke = String(e.props?.stroke ?? "#e5e7eb");
         const thickness = Math.max(1, Number(e.props?.thickness ?? 2));
@@ -238,9 +306,14 @@ function renderSvgPreview(spec: ModuleForgeSpec): string {
       }
       if (e.type === "Header" || e.type === "Title" || e.type === "BodyText") {
         const text = String(e.props?.text ?? e.type);
-        const fontSize = Math.max(8, Number(e.props?.fontSize ?? 14));
+        const fontSize = Math.max(8, Number(e.props?.fontSize ?? (e.type === "BodyText" ? 12 : e.type === "Title" ? 18 : 24)) || 12);
+        const fontWeight = Number(e.props?.fontWeight ?? (e.type === "Header" ? 700 : 400)) || (e.type === "Header" ? 700 : 400);
         const color = String(e.props?.color ?? "#111827");
-        return `<text x="${rx}" y="${ry + fontSize}" font-size="${fontSize}" fill="${color}">${escapeXml(text)}</text>`;
+        const align = String(e.props?.textAlign ?? "left").toLowerCase();
+        const pad = 6;
+        const x = align === "center" ? rx + ew / 2 : align === "right" ? rx + ew - pad : rx + pad;
+        const anchor = align === "center" ? "middle" : align === "right" ? "end" : "start";
+        return `<text x="${x}" y="${ry + pad + fontSize}" font-size="${fontSize}" font-weight="${fontWeight}" text-anchor="${anchor}" fill="${color}">${escapeXml(text)}</text>`;
       }
       return `<rect x="${rx}" y="${ry}" width="${ew}" height="${eh}" fill="rgba(0,0,0,0.02)" stroke="#e5e7eb" />`;
     })
@@ -305,7 +378,7 @@ export default function ModuleForgeEditorApp() {
         if (!isModuleStackableType(e.type)) return e;
         const n = laidOut.find((x) => x.id === e.id);
         if (!n) return e;
-        // Module editor is wireframe/structural only: strip content & typography props.
+        // Module editor is primarily structural; keep minimal style props (typography for Header/BodyText) but strip content.
         const preset = getLayoutPreset(e);
         const nextProps: Record<string, any> =
           e.type === "Divider"
@@ -314,6 +387,24 @@ export default function ModuleForgeEditorApp() {
                 stroke: String(e.props?.stroke ?? "#e5e7eb"),
                 thickness: Math.max(1, Number(e.props?.thickness ?? 2)),
               }
+            : e.type === "Pattern"
+              ? {
+                  layoutPreset: preset,
+                  variant: String(e.props?.variant ?? "grid"),
+                  stroke: String(e.props?.stroke ?? "#e5e7eb"),
+                  spacing: Math.max(6, Number(e.props?.spacing ?? 16) || 16),
+                  outline: Boolean(e.props?.outline ?? false),
+                  outlineThickness: Math.max(0, Number(e.props?.outlineThickness ?? 2) || 0),
+                }
+              : e.type === "Header" || e.type === "BodyText" || e.type === "Title"
+                ? {
+                    layoutPreset: preset,
+                    fontSize: Math.max(8, Number(e.props?.fontSize ?? (e.type === "BodyText" ? 12 : e.type === "Title" ? 18 : 24)) || 12),
+                    fontWeight: Number(e.props?.fontWeight ?? (e.type === "Header" ? 700 : 400)) || (e.type === "Header" ? 700 : 400),
+                    textAlign: String(e.props?.textAlign ?? "left"),
+                    lineHeight: Math.max(1, Number(e.props?.lineHeight ?? (e.type === "BodyText" ? 1.35 : e.type === "Title" ? 1.25 : 1.2)) || 1.2),
+                    color: String(e.props?.color ?? "#111827"),
+                  }
             : { layoutPreset: preset };
         const r1 = e.rect;
         const r2 = n.rect;
@@ -328,6 +419,20 @@ export default function ModuleForgeEditorApp() {
             ? String(p1.layoutPreset ?? "fixed") === String(nextProps.layoutPreset ?? "fixed") &&
               String(p1.stroke ?? "#e5e7eb") === String(nextProps.stroke) &&
               Math.max(1, Number(p1.thickness ?? 2)) === Number(nextProps.thickness)
+            : e.type === "Pattern"
+              ? String(p1.layoutPreset ?? "fixed") === String(nextProps.layoutPreset ?? "fixed") &&
+                String(p1.variant ?? "grid") === String(nextProps.variant ?? "grid") &&
+                String(p1.stroke ?? "#e5e7eb") === String(nextProps.stroke ?? "#e5e7eb") &&
+                Math.max(6, Number(p1.spacing ?? 16) || 16) === Number(nextProps.spacing ?? 16) &&
+                Boolean(p1.outline ?? false) === Boolean(nextProps.outline ?? false) &&
+                Math.max(0, Number(p1.outlineThickness ?? 2) || 0) === Number(nextProps.outlineThickness ?? 2)
+              : e.type === "Header" || e.type === "BodyText" || e.type === "Title"
+                ? String(p1.layoutPreset ?? "fixed") === String(nextProps.layoutPreset ?? "fixed") &&
+                  Math.max(8, Number(p1.fontSize ?? 12) || 12) === Number(nextProps.fontSize ?? 12) &&
+                  Number(p1.fontWeight ?? 400) === Number(nextProps.fontWeight ?? 400) &&
+                  String(p1.textAlign ?? "left") === String(nextProps.textAlign ?? "left") &&
+                  Math.max(1, Number(p1.lineHeight ?? 1.2) || 1.2) === Number(nextProps.lineHeight ?? 1.2) &&
+                  String(p1.color ?? "#111827") === String(nextProps.color ?? "#111827")
             : String(p1.layoutPreset ?? "fixed") === String(nextProps.layoutPreset ?? "fixed") &&
               Object.keys(p1).every((k) => k === "layoutPreset");
         if (sameRect && sameProps) return e;
@@ -922,7 +1027,7 @@ export default function ModuleForgeEditorApp() {
                 [
                   ...(kind === "layout"
                     ? (["Slot"] as const)
-                    : (["Header", "BodyText", "Divider"] as const)),
+                : (["Header", "BodyText", "Divider", "Pattern"] as const)),
                 ] as const
               ).map((t) => (
                 <div
@@ -996,6 +1101,27 @@ export default function ModuleForgeEditorApp() {
                 {/* Legacy/non-stacked elements (kept as-is, selectable/deletable) */}
                 {(moduleLayout?.legacy ?? []).map((e) => {
                   const isSel = e.id === selectedId;
+                  const patternVariant = String((e.props as any)?.variant ?? "grid").toLowerCase();
+                  const patternStroke = String((e.props as any)?.stroke ?? "#e5e7eb");
+                  const patternOutline = Boolean((e.props as any)?.outline ?? false);
+                  const patternOutlineThickness = Math.max(0, Number((e.props as any)?.outlineThickness ?? 2) || 0);
+                  const patternSpacing = Math.max(
+                    6,
+                    Number((e.props as any)?.spacing ?? (patternVariant === "dots" ? 12 : patternVariant === "grid" ? 16 : 16)) ||
+                      16,
+                  );
+
+                  const patternBackground =
+                    e.type !== "Pattern"
+                      ? undefined
+                      : patternVariant === "blank"
+                        ? "transparent"
+                        : patternVariant === "lines"
+                          ? `repeating-linear-gradient(to bottom, transparent 0, transparent ${patternSpacing - 1}px, ${patternStroke} ${patternSpacing - 1}px, ${patternStroke} ${patternSpacing}px)`
+                          : patternVariant === "grid"
+                            ? `linear-gradient(${patternStroke} 1px, transparent 1px), linear-gradient(90deg, ${patternStroke} 1px, transparent 1px)`
+                            : `radial-gradient(circle, ${patternStroke} 1.2px, transparent 1.4px)`;
+
                   return (
                     <div
                       key={e.id}
@@ -1013,9 +1139,28 @@ export default function ModuleForgeEditorApp() {
                             ? String(e.props?.fill ?? "#f8fafc")
                             : e.type === "Divider"
                               ? String(e.props?.stroke ?? "#e5e7eb")
+                              : e.type === "Pattern"
+                                ? patternBackground
                               : "transparent",
+                        backgroundSize:
+                          e.type === "Pattern"
+                            ? patternVariant === "grid"
+                              ? `${patternSpacing}px ${patternSpacing}px`
+                              : patternVariant === "dots"
+                                ? `${patternSpacing}px ${patternSpacing}px`
+                                : undefined
+                            : undefined,
                         borderStyle: e.type === "Slot" ? "dotted" : "solid",
-                        borderColor: e.type === "Slot" ? "#60a5fa" : undefined,
+                        borderColor:
+                          e.type === "Slot"
+                            ? "#60a5fa"
+                            : e.type === "Pattern" && patternOutline
+                              ? patternStroke
+                              : undefined,
+                        borderWidth:
+                          e.type === "Pattern" && patternOutline
+                            ? Math.max(1, Math.min(24, patternOutlineThickness || 1))
+                            : undefined,
                       }}
                       onMouseDown={(ev) => {
                         ev.stopPropagation();
@@ -1023,7 +1168,10 @@ export default function ModuleForgeEditorApp() {
                       }}
                       title={`Legacy: ${e.type}`}
                     >
-                      <div className="text-[11px] text-muted-foreground p-1 select-none">Legacy: {e.type}</div>
+                      <div className="text-[11px] text-muted-foreground p-1 select-none">
+                        Legacy: {e.type}
+                        {e.type === "Pattern" ? ` (${patternVariant || "grid"})` : ""}
+                      </div>
                     </div>
                   );
                 })}
@@ -1033,6 +1181,21 @@ export default function ModuleForgeEditorApp() {
                   const isSel = e.id === selectedId;
                   const preset = getLayoutPreset(e);
                   const showDropIndicator = draggingElementId && dragInsertIndex === idx;
+                  const patternVariant = String((e.props as any)?.variant ?? "grid").toLowerCase();
+                  const patternStroke = String((e.props as any)?.stroke ?? "#e5e7eb");
+                  const patternOutline = Boolean((e.props as any)?.outline ?? false);
+                  const patternOutlineThickness = Math.max(0, Number((e.props as any)?.outlineThickness ?? 2) || 0);
+                  const patternSpacing = Math.max(6, Number((e.props as any)?.spacing ?? 16) || 16);
+                  const patternBackground =
+                    e.type !== "Pattern"
+                      ? undefined
+                      : patternVariant === "blank"
+                        ? "transparent"
+                        : patternVariant === "lines"
+                          ? `repeating-linear-gradient(to bottom, transparent 0, transparent ${patternSpacing - 1}px, ${patternStroke} ${patternSpacing - 1}px, ${patternStroke} ${patternSpacing}px)`
+                          : patternVariant === "grid"
+                            ? `linear-gradient(${patternStroke} 1px, transparent 1px), linear-gradient(90deg, ${patternStroke} 1px, transparent 1px)`
+                            : `radial-gradient(circle, ${patternStroke} 1.2px, transparent 1.4px)`;
                   const bg =
                     e.type === "Header"
                       ? "rgba(59,130,246,0.12)"
@@ -1040,6 +1203,8 @@ export default function ModuleForgeEditorApp() {
                         ? "rgba(16,185,129,0.12)"
                         : e.type === "Title"
                           ? "rgba(168,85,247,0.12)"
+                          : e.type === "Pattern"
+                            ? "transparent"
                           : "rgba(107,114,128,0.10)";
                   return (
                     <div key={e.id}>
@@ -1062,6 +1227,16 @@ export default function ModuleForgeEditorApp() {
                           width: e.rect.w,
                           height: e.rect.h,
                           zIndex: e.zIndex,
+                          background: e.type === "Pattern" ? patternBackground : "transparent",
+                          backgroundSize:
+                            e.type === "Pattern" && (patternVariant === "grid" || patternVariant === "dots")
+                              ? `${patternSpacing}px ${patternSpacing}px`
+                              : undefined,
+                          borderColor: e.type === "Pattern" && patternOutline ? patternStroke : undefined,
+                          borderWidth:
+                            e.type === "Pattern" && patternOutline
+                              ? Math.max(1, Math.min(24, patternOutlineThickness || 1))
+                              : undefined,
                         }}
                         onDragStart={(ev) => {
                           ev.dataTransfer.setData("application/x-moduleforge-reorder", e.id);
@@ -1197,17 +1372,23 @@ export default function ModuleForgeEditorApp() {
                 <div className="space-y-3">
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">Sizing</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      {(["fixed", "fill"] as const).map((p) => {
+                    <div className="grid grid-cols-3 gap-2">
+                      {(["fixed", "fit", "fill"] as const).map((p) => {
                         const active = getLayoutPreset(selected) === p;
                         return (
                           <button
                             key={p}
                             className={`px-3 py-2 text-sm border rounded ${active ? "bg-accent" : "hover:bg-accent"}`}
                             onClick={() => updateElement(selected.id, { props: { ...(selected.props ?? {}), layoutPreset: p } })}
-                            title={p === "fill" ? "Fill remaining space (flex-grow)" : "Fixed height"}
+                            title={
+                              p === "fill"
+                                ? "Fill remaining space (flex-grow)"
+                                : p === "fit"
+                                  ? "Shrink to fit content (best used for text elements)"
+                                  : "Fixed height"
+                            }
                           >
-                            {p === "fill" ? "Fill" : "Fixed"}
+                            {p === "fill" ? "Fill" : p === "fit" ? "Fit" : "Fixed"}
                           </button>
                         );
                       })}
@@ -1333,6 +1514,115 @@ export default function ModuleForgeEditorApp() {
                       value={String(selected.props?.stroke ?? "")}
                       onChange={(e) => updateElement(selected.id, { props: { ...selected.props, stroke: e.target.value } })}
                     />
+                  </div>
+                </div>
+              ) : null}
+
+              {selected.type === "Pattern" ? (
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">variant</label>
+                    <select
+                      className="w-full border rounded px-3 py-2 text-sm bg-background"
+                      value={String(selected.props?.variant ?? "grid")}
+                      onChange={(e) => updateElement(selected.id, { props: { ...selected.props, variant: e.target.value } })}
+                    >
+                      {["lines", "grid", "dots", "blank"].map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {String(selected.props?.variant ?? "grid").toLowerCase() !== "blank" ? (
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">spacing</label>
+                      <input
+                        className="w-full border rounded px-3 py-2 text-sm bg-background"
+                        type="number"
+                        value={Number(selected.props?.spacing ?? 16)}
+                        onChange={(e) =>
+                          updateElement(selected.id, { props: { ...selected.props, spacing: clamp(Number(e.target.value), 6, 200) } })
+                        }
+                      />
+                    </div>
+                  ) : null}
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">stroke</label>
+                    <input
+                      className="w-full border rounded px-3 py-2 text-sm bg-background"
+                      value={String(selected.props?.stroke ?? "#e5e7eb")}
+                      onChange={(e) => updateElement(selected.id, { props: { ...selected.props, stroke: e.target.value } })}
+                      placeholder="#e5e7eb"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(selected.props?.outline ?? false)}
+                      onChange={(e) => updateElement(selected.id, { props: { ...selected.props, outline: e.target.checked } })}
+                    />
+                    Outline
+                  </label>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">outline thickness</label>
+                    <input
+                      className="w-full border rounded px-3 py-2 text-sm bg-background"
+                      type="number"
+                      value={Number(selected.props?.outlineThickness ?? 2)}
+                      onChange={(e) =>
+                        updateElement(selected.id, {
+                          props: { ...selected.props, outlineThickness: clamp(Number(e.target.value), 0, 48) },
+                        })
+                      }
+                      disabled={!Boolean(selected.props?.outline ?? false)}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              {selected.type === "Header" || selected.type === "BodyText" ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">font size</label>
+                      <input
+                        className="w-full border rounded px-2 py-1 text-sm bg-background"
+                        type="number"
+                        value={Number(selected.props?.fontSize ?? (selected.type === "BodyText" ? 12 : 24))}
+                        onChange={(e) =>
+                          updateElement(selected.id, {
+                            props: { ...selected.props, fontSize: clamp(Number(e.target.value), 8, 200) },
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">weight</label>
+                      <select
+                        className="w-full border rounded px-2 py-1 text-sm bg-background"
+                        value={String(selected.props?.fontWeight ?? (selected.type === "Header" ? 700 : 400))}
+                        onChange={(e) =>
+                          updateElement(selected.id, { props: { ...selected.props, fontWeight: Number(e.target.value) } })
+                        }
+                      >
+                        <option value="400">Normal</option>
+                        <option value="600">Semibold</option>
+                        <option value="700">Bold</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">alignment</label>
+                    <select
+                      className="w-full border rounded px-3 py-2 text-sm bg-background"
+                      value={String(selected.props?.textAlign ?? "left")}
+                      onChange={(e) => updateElement(selected.id, { props: { ...selected.props, textAlign: e.target.value } })}
+                    >
+                      <option value="left">Left</option>
+                      <option value="center">Center</option>
+                      <option value="right">Right</option>
+                    </select>
                   </div>
                 </div>
               ) : null}

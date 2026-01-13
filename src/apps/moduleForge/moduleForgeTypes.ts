@@ -4,6 +4,7 @@ export type ModuleForgeElementType =
   | "BackgroundTexture"
   | "Container"
   | "GridLines"
+  | "Pattern"
   | "Header"
   | "Title"
   | "BodyText"

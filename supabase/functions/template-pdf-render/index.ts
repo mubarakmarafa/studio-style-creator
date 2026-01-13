@@ -54,6 +54,11 @@ function toPdfY(pageH: number, yTop: number, h: number) {
   return pageH - yTop - h;
 }
 
+function toPdfYPoint(pageH: number, yTop: number) {
+  // Convert a Y position (top-left origin) to a PDF point Y (bottom-left origin)
+  return pageH - yTop;
+}
+
 async function renderPdfFromSpec(spec: any): Promise<Uint8Array> {
   const canvasW = Number(spec?.canvas?.w ?? 612) || 612;
   const canvasH = Number(spec?.canvas?.h ?? 792) || 792;
@@ -62,6 +67,7 @@ async function renderPdfFromSpec(spec: any): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([canvasW, canvasH]);
   const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
   const sorted = elements
     .slice()
@@ -108,6 +114,70 @@ async function renderPdfFromSpec(spec: any): Promise<Uint8Array> {
           end: { x: canvasW, y: ly },
           thickness: 1,
           color: rgb(stroke.r, stroke.g, stroke.b),
+        });
+      }
+      continue;
+    }
+
+    if (type === "Pattern") {
+      const variant = String(props?.variant ?? "grid").toLowerCase();
+      const stroke = parseHexColor(String(props?.stroke ?? "#e5e7eb"));
+      const outline = Boolean(props?.outline ?? false);
+      const outlineThickness = Math.max(0, Number(props?.outlineThickness ?? 2) || 0);
+      const spacing = Math.max(6, Number(props?.spacing ?? (variant === "dots" ? 12 : variant === "grid" ? 16 : 16)) || 16);
+
+      if (variant === "lines") {
+        for (let yTop = y + spacing; yTop < y + h; yTop += spacing) {
+          const yPdf = toPdfYPoint(canvasH, yTop);
+          page.drawLine({
+            start: { x, y: yPdf },
+            end: { x: x + w, y: yPdf },
+            thickness: 1,
+            color: rgb(stroke.r, stroke.g, stroke.b),
+          });
+        }
+      } else if (variant === "grid") {
+        for (let xTop = x + spacing; xTop < x + w; xTop += spacing) {
+          page.drawLine({
+            start: { x: xTop, y: toPdfYPoint(canvasH, y) },
+            end: { x: xTop, y: toPdfYPoint(canvasH, y + h) },
+            thickness: 1,
+            color: rgb(stroke.r, stroke.g, stroke.b),
+          });
+        }
+        for (let yTop = y + spacing; yTop < y + h; yTop += spacing) {
+          const yPdf = toPdfYPoint(canvasH, yTop);
+          page.drawLine({
+            start: { x, y: yPdf },
+            end: { x: x + w, y: yPdf },
+            thickness: 1,
+            color: rgb(stroke.r, stroke.g, stroke.b),
+          });
+        }
+      } else if (variant === "dots") {
+        const r = 1.2;
+        for (let xTop = x + spacing / 2; xTop < x + w; xTop += spacing) {
+          for (let yTop = y + spacing / 2; yTop < y + h; yTop += spacing) {
+            page.drawCircle({
+              x: xTop,
+              y: toPdfYPoint(canvasH, yTop),
+              size: r,
+              color: rgb(stroke.r, stroke.g, stroke.b),
+            });
+          }
+        }
+      } else {
+        // blank
+      }
+
+      if (outline && outlineThickness > 0) {
+        page.drawRectangle({
+          x,
+          y: toPdfY(canvasH, y, h),
+          width: w,
+          height: h,
+          borderWidth: outlineThickness,
+          borderColor: rgb(stroke.r, stroke.g, stroke.b),
         });
       }
       continue;
@@ -164,18 +234,37 @@ async function renderPdfFromSpec(spec: any): Promise<Uint8Array> {
     if (type === "Header" || type === "Title" || type === "BodyText") {
       const text = String(props?.text ?? type);
       const fontSize = Math.max(8, Number(props?.fontSize ?? 14) || 14);
+      const fwRaw: any = props?.fontWeight ?? (type === "Header" ? 700 : 400);
+      const fontWeight =
+        typeof fwRaw === "string"
+          ? fwRaw.toLowerCase() === "bold"
+            ? 700
+            : Number(fwRaw) || (type === "Header" ? 700 : 400)
+          : Number(fwRaw) || (type === "Header" ? 700 : 400);
+      const align = String(props?.textAlign ?? "left").toLowerCase();
       const color = parseHexColor(String(props?.color ?? "#111827"));
       const lines = text.split(/\r?\n/);
       const lineHeight = Math.max(1, Number(props?.lineHeight ?? 1.2) || 1.2);
+      const useFont = fontWeight >= 600 ? fontBold : font;
       let dy = 0;
       for (const line of lines) {
+        const safe = String(line ?? "");
+        const maxWidth = Math.max(0, w - 12);
+        const tw = useFont.widthOfTextAtSize(safe, fontSize);
+        const xLeft = x + 6;
+        const tx =
+          align === "center"
+            ? Math.max(xLeft, x + (w - tw) / 2)
+            : align === "right"
+              ? Math.max(xLeft, x + w - 6 - tw)
+              : xLeft;
         page.drawText(line, {
-          x: x + 6,
+          x: tx,
           y: toPdfY(canvasH, y, h) + h - fontSize - 6 - dy,
           size: fontSize,
-          font,
+          font: useFont,
           color: rgb(color.r, color.g, color.b),
-          maxWidth: Math.max(0, w - 12),
+          maxWidth,
         });
         dy += fontSize * lineHeight;
         if (dy > h) break;
