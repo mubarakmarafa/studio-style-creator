@@ -679,7 +679,11 @@ export default function TemplateAssemblerApp() {
       modSpec: any,
       slotRect: any,
     ): Array<{ type: string; rect: { x: number; y: number; w: number; h: number } }> {
-      const modEls = Array.isArray(modSpec?.elements) ? modSpec.elements : [];
+      // Avoid `any[]` here so downstream map/filter callbacks aren't implicitly `any` under `strict`.
+      const modEls: Array<{
+        type?: unknown;
+        rect?: { x?: unknown; y?: unknown; w?: unknown; h?: unknown };
+      }> = Array.isArray(modSpec?.elements) ? modSpec.elements : [];
 
       let minX = Number.POSITIVE_INFINITY;
       let minY = Number.POSITIVE_INFINITY;
@@ -709,7 +713,7 @@ export default function TemplateAssemblerApp() {
       const baseY = Number(slotRect?.y ?? 0) + (Number(slotRect?.h ?? 1) - boundsH * scale) / 2 - boundsY * scale;
 
       return modEls
-        .map((e: any) => {
+        .map((e) => {
           const r = e?.rect ?? {};
           const nx = baseX + (Number(r?.x ?? 0) || 0) * scale;
           const ny = baseY + (Number(r?.y ?? 0) || 0) * scale;
