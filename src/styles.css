@@ -261,4 +261,21 @@ h2 {
   min-height: 20px !important;
 }
 
+@keyframes style-builder-marching-ants {
+  to {
+    background-position: 8px 0, -8px 100%, 0 -8px, 100% 8px;
+  }
+}
+
+.style-builder-flow :where(.react-flow__selection, .xyflow__selection) {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(90deg, #60a5fa 50%, transparent 0) 0 0/8px 1px repeat-x,
+    linear-gradient(90deg, #60a5fa 50%, transparent 0) 0 100%/8px 1px repeat-x,
+    linear-gradient(0deg, #60a5fa 50%, transparent 0) 0 0/1px 8px repeat-y,
+    linear-gradient(0deg, #60a5fa 50%, transparent 0) 100% 0/1px 8px repeat-y;
+  background-color: rgba(96, 165, 250, 0.08);
+  animation: style-builder-marching-ants 0.6s linear infinite;
+}
+
 

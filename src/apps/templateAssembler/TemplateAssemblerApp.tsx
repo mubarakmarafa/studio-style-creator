@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { Edge, Node } from "@xyflow/react";
-import { Background, Controls, MiniMap, ReactFlow, addEdge, useEdgesState, useNodesState } from "@xyflow/react";
+import { Background, Controls, MiniMap, ReactFlow, SelectionMode, addEdge, useEdgesState, useNodesState } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { supabase } from "@/supabase";
 import { getStudioClientId } from "@/studio/clientId";
@@ -1651,9 +1651,19 @@ export default function TemplateAssemblerApp() {
             onConnect={onConnect}
             nodeTypes={nodeTypes as any}
             fitView
-              onInit={(instance) => {
-                reactFlowInstanceRef.current = instance;
-              }}
+            minZoom={0.05}
+            maxZoom={8}
+            // Interaction: make left-drag box-select (multi-select), and reserve panning for trackpad scroll / Space+drag / middle click.
+            selectionOnDrag
+            selectionMode={SelectionMode.Partial}
+            panOnDrag={[1, 2]}
+            panActivationKeyCode="Space"
+            panOnScroll
+            zoomOnScroll={false}
+            multiSelectionKeyCode="Shift"
+            onInit={(instance) => {
+              reactFlowInstanceRef.current = instance;
+            }}
           >
             <Background />
             <MiniMap />
