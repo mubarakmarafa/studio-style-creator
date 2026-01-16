@@ -1062,6 +1062,7 @@ VITE_SUPABASE_ANON_KEY=...`}
         {/* Center: React Flow Canvas */}
         <div ref={reactFlowWrapperRef} className="flex-1 relative min-h-0">
           <ReactFlow
+            className="style-builder-flow"
             nodes={nodes}
             edges={edges}
             onNodesChange={onNodesChange}
