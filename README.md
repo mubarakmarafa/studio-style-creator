@@ -1,79 +1,104 @@
-# OpenAI API Key Test (Vite + Supabase Edge Function)
+# Content Studio
 
-This is a tiny Vite app to test:
-- **Chat** (text response)
-- **Image generation** (base64 image) — default model is `gpt-image-1` (you can type `gpt-image-1.5` if your account supports it)
+Content Studio is a multi-app design system for generative workflows. It gives us a shared shell and a set of focused tools for building, combining, and producing visual content. This README is written for fellow designers who want to add new apps or expand existing ones.
 
-Your **OpenAI API key never goes to the browser**. It’s stored on Supabase as a **secret** (`OPENAI_API_KEY`) and used only inside a Supabase **Edge Function**.
+## Apps in the studio today
 
-## 1) Create your Vite env file
+- Style Builder: build node graphs that compile into a style JSON and generate images. Save projects and image assets.
+- Module Forge: create reusable layout and content modules with slot-based templates.
+- Template Assembler: wire layouts and module sets into a graph to generate template combinations, with optional AI text fill and PDF previews.
+- Pack Creator: select a saved style plus a subject list and run background sticker pack jobs with a gallery and downloads.
+- WIP ideas: Handwriting Synthesiser, Colour Palette Discoverer, Prompt Pack Writer (shown as disabled cards).
 
-Create **`.env.local`** in the project root:
+## How the pieces connect
 
-```bash
-VITE_SUPABASE_URL=https://thnhctjkonxzggdfyixw.supabase.co
-# Recommended (safe to use in the browser): Supabase publishable key
-VITE_SUPABASE_ANON_KEY=sb_publishable_2C2mZT_vil6-rj6WNhTK3w_Wa4Q6ecA
-# Optional override (if inference fails):
-# VITE_SUPABASE_FUNCTIONS_BASE_URL=https://YOUR-PROJECT-REF.supabase.co/functions/v1
+- Style Builder produces compiled style JSON that becomes a saved style for Pack Creator.
+- Module Forge produces layout and module specs that Template Assembler combines into final templates.
+- Supabase stores projects, modules, assemblies, and generated assets for all apps.
+
+## Add a new app (designer friendly)
+
+1. Create a new folder in `src/apps/<yourApp>/`.
+2. Build a main app component and (if needed) a router component.
+3. Register your app in the studio registry so it shows up in the sidebar and landing page.
+
+Example app entry:
+
+```ts
+// src/studio/appRegistry.ts
+{
+  id: "my-new-app",
+  title: "My New App",
+  description: "Short sentence describing the workflow.",
+  route: "/my-new-app/*",
+  navTo: "/my-new-app",
+  icon: Sparkles,
+  loader: () => import("@/apps/myNewApp/MyNewAppRouterApp"),
+}
 ```
 
-Notes:
-- `VITE_SUPABASE_ANON_KEY` can also be the legacy `anon` JWT key, but **publishable** is recommended for new apps.
-- The key above is exactly the publishable key (no trailing `?`).
-- After editing `.env.local`, **stop and restart** `npm run dev` (Vite only loads env vars on startup).
+If your app is still a concept, add it to `WIP_STUDIO_APPS` instead so it shows as "Under Construction".
 
-## Deploy to Vercel (fixes “Configuration Required”)
+## App structure patterns to copy
 
-That “Configuration Required / Missing VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY” screen happens on Vercel when the
-frontend is deployed without the required Vite env vars.
+- Use a RouterApp when you have list + editor views (see Style Builder, Module Forge, Template Assembler).
+- Save a "last opened" id in localStorage to make returning feel instant.
+- Keep list pages in a `max-w-*` container and use card grids for browsing.
+- The Studio shell (`StudioLayout`) is shared, so your app should only render its own content area.
 
-1. In the Supabase dashboard, open your project:
-   - **Project URL**: `Project Settings → API → Project URL`
-   - **Key**: `Project Settings → API → Project API keys`
-     - Prefer the **publishable** key (`sb_publishable_...`) for browser usage (legacy `anon` also works).
-2. In Vercel: `Project → Settings → Environment Variables`
-   - Add `VITE_SUPABASE_URL`
-   - Add `VITE_SUPABASE_ANON_KEY`
-   - (Optional) Add `VITE_SUPABASE_FUNCTIONS_BASE_URL` if your Supabase URL isn’t standard
-   - (Optional) Add `VITE_STYLE_BUILDER_CLIENT_ID` (default: `public`) — used only as metadata for new Style Builder projects
-   - Make sure you add them to the correct environment(s): **Production** (and **Preview** if you use preview deploys).
-3. **Redeploy** (env vars are baked into the Vite build output):
-   - Trigger a new deployment in Vercel (or “Redeploy” the latest).
+## Design conventions
 
-Tip: there’s a copy/paste template in `env.example` for local development.
+- Use Tailwind utility tokens like `bg-background`, `text-foreground`, `text-muted-foreground`, `bg-card`, and `border`.
+- Use `Modal` for dialog work and `cn()` for conditional class names.
+- If you build a node editor, reuse `@xyflow/react` patterns from Style Builder or Template Assembler.
 
-## 2) Install + run the frontend
+## Supabase data model (high level)
 
-```bash
-npm install
-npm run dev
-```
+Tables:
+- `style_builder_projects`, `style_builder_assets`
+- `template_modules`, `template_assemblies`, `template_jobs`, `template_job_items`, `generated_templates`
+- `sticker_styles`, `subject_lists`, `sticker_jobs`, `stickers`
 
-## 3) Set up Supabase + deploy the Edge Function
+Storage buckets:
+- `style_builder_assets`
+- `template_assets`, `template_pdfs`
+- `stickers`, `sticker_thumbnails`
 
-### Option A: Supabase Cloud (recommended)
+## Edge functions
 
-1. Install and login to the Supabase CLI.
-2. Link this folder to your Supabase project:
+- `openai-proxy`: chat, image generation, style-from-image, refine prompt.
+- `sticker-pack`: create jobs, queue stickers, cancel or resume jobs.
+- `sticker-worker`: process queued stickers and upload images.
+- `template-pdf-render`: render PDFs for template previews or batch jobs.
 
-```bash
-supabase link --project-ref thnhctjkonxzggdfyixw
-```
+## Local development
 
-3. Store your OpenAI key as a secret (server-side only):
+1. Install dependencies:
+   - `npm install`
+2. Copy `env.example` to `.env.local` and set:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+   - Optional: `VITE_SUPABASE_FUNCTIONS_BASE_URL`
+   - Optional: `VITE_STYLE_BUILDER_CLIENT_ID`
+3. Run the app:
+   - `npm run dev`
 
-```bash
-supabase secrets set OPENAI_API_KEY=YOUR_OPENAI_KEY
-```
+## Supabase setup (cloud)
 
-4. Deploy the function:
+1. Link the project:
+   - `supabase link --project-ref <your-project-ref>`
+2. Set secrets:
+   - `supabase secrets set OPENAI_API_KEY=...`
+   - `supabase secrets set SUPABASE_URL=...`
+   - `supabase secrets set SUPABASE_SERVICE_ROLE_KEY=...`
+   - `supabase secrets set SUPABASE_DB_URL=...`
+3. Deploy functions:
+   - `supabase functions deploy openai-proxy`
+   - `supabase functions deploy sticker-pack`
+   - `supabase functions deploy sticker-worker`
+   - `supabase functions deploy template-pdf-render`
 
-```bash
-supabase functions deploy openai-proxy
-```
-
-### Option B: Supabase Local (works for testing)
+## Supabase setup (local)
 
 ```bash
 supabase start
@@ -81,15 +106,12 @@ supabase secrets set OPENAI_API_KEY=YOUR_OPENAI_KEY
 supabase functions serve openai-proxy --no-verify-jwt
 ```
 
-Then set:
+Then set `VITE_SUPABASE_FUNCTIONS_BASE_URL=http://localhost:54321/functions/v1`.
 
-```bash
-VITE_SUPABASE_FUNCTIONS_BASE_URL=http://localhost:54321/functions/v1
-```
+## Deploying the web app
 
-## Notes / security
+Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in your hosting provider (Vercel or similar), then redeploy so Vite bakes the env vars into the build.
 
-- The repo includes `supabase/config.toml` with `verify_jwt = false` so you can test quickly.
-- If you plan to ship this, switch to **`verify_jwt = true`**, require a logged-in user, and add rate limiting.
+## Security note
 
-
+The repo currently runs in a no-auth posture (`verify_jwt = false`). This is intentional for fast prototyping. If you plan to ship, enable auth, tighten RLS policies, and add rate limiting.
