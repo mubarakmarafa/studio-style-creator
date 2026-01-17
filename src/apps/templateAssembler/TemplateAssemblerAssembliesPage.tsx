@@ -24,11 +24,9 @@ export default function TemplateAssemblerAssembliesPage() {
     setErr(null);
     setLoading(true);
     try {
-      const clientId = getStudioClientId();
       const { data, error } = await supabase
         .from("template_assemblies")
         .select("id,client_id,name,description,created_at,updated_at")
-        .eq("client_id", clientId)
         .order("updated_at", { ascending: false });
       if (error) throw error;
       setRows((data ?? []) as any);

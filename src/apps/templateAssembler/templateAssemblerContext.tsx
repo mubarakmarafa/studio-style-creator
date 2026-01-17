@@ -11,7 +11,7 @@ export type TemplateAssemblerContextValue = {
   layouts: TemplateModuleListItem[];
   modules: TemplateModuleListItem[];
   updateNodeData: (nodeId: string, patch: Record<string, any>) => void;
-  requestGenerate: (assemblerNodeId: string) => void;
+  requestGenerate: (assemblerNodeId: string) => Promise<void>;
 };
 
 const Ctx = createContext<TemplateAssemblerContextValue | null>(null);

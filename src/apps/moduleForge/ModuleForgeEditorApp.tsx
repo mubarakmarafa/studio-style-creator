@@ -1,5 +1,5 @@
 import type { DragEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { supabase } from "@/supabase";
 import { getStudioClientId } from "@/studio/clientId";
@@ -325,6 +325,20 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
 }
 
+function normalizeHexColor(input: unknown, fallback: string): string {
+  const raw = String(input ?? "").trim();
+  if (!raw) return fallback;
+  // Accept #RGB and #RRGGBB; normalize to #RRGGBB for <input type="color">.
+  const m3 = raw.match(/^#([0-9a-fA-F]{3})$/);
+  if (m3) {
+    const [r, g, b] = m3[1]!.split("");
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+  const m6 = raw.match(/^#([0-9a-fA-F]{6})$/);
+  if (m6) return `#${m6[1]}`.toLowerCase();
+  return fallback;
+}
+
 export default function ModuleForgeEditorApp() {
   const { moduleId } = useParams();
   const navigate = useNavigate();
@@ -445,12 +459,23 @@ export default function ModuleForgeEditorApp() {
   }, [kind, moduleLayout]);
 
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  useEffect(() => {
+    savingRef.current = saving;
+  }, [saving]);
   const [deleting, setDeleting] = useState(false);
   const [jsonOpen, setJsonOpen] = useState(false);
   const [rawJson, setRawJson] = useState("");
   const [rawErr, setRawErr] = useState<string | null>(null);
   const [draggingElementId, setDraggingElementId] = useState<string | null>(null);
   const [dragInsertIndex, setDragInsertIndex] = useState<number | null>(null);
+
+  // Autosave (debounced). Avoid creating new rows just by opening the editor;
+  // only persist once the user changes something relative to the loaded/default snapshot.
+  const initialSnapshotKeyRef = useRef<string | null>(null);
+  const lastSavedKeyRef = useRef<string | null>(null);
+  const autosaveTimerRef = useRef<number | null>(null);
+  const autosaveTokenRef = useRef(0);
 
   // Delete selected element with keyboard (safe around text inputs).
   useEffect(() => {
@@ -498,12 +523,10 @@ export default function ModuleForgeEditorApp() {
         return;
       }
 
-      const clientId = getStudioClientId();
       const { data, error } = await supabase
         .from("template_modules")
         .select("id,client_id,kind,name,spec_json,preview_path,created_at,updated_at")
         .eq("id", moduleId)
-        .eq("client_id", clientId)
         .maybeSingle();
       if (error) throw error;
       if (!data) throw new Error("Module not found.");
@@ -536,6 +559,114 @@ export default function ModuleForgeEditorApp() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moduleId]);
+
+  function snapshotKeyForAutosave(): string {
+    return JSON.stringify({
+      v: 1,
+      name: name.trim() || (kind === "layout" ? "Untitled layout" : "Untitled module"),
+      kind,
+      spec,
+    });
+  }
+
+  // Seed autosave baselines after load completes (or default state for new).
+  useEffect(() => {
+    if (loading) return;
+    const key = snapshotKeyForAutosave();
+    initialSnapshotKeyRef.current = key;
+    lastSavedKeyRef.current = key;
+    if (autosaveTimerRef.current) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, moduleId]);
+
+  // Debounced autosave on edits.
+  useEffect(() => {
+    if (loading) return;
+    if (savingRef.current) return;
+
+    const key = snapshotKeyForAutosave();
+    const baseline = initialSnapshotKeyRef.current;
+    const lastSaved = lastSavedKeyRef.current;
+    const isDirty = baseline ? key !== baseline : true;
+    const alreadySaved = lastSaved ? key === lastSaved : false;
+    if (!isDirty || alreadySaved) return;
+
+    if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(() => {
+      const token = ++autosaveTokenRef.current;
+      void (async () => {
+        try {
+          const clientId = getStudioClientId();
+          const cleanedName = name.trim() || (kind === "layout" ? "Untitled layout" : "Untitled module");
+          const nextSpec = { ...spec, kind } satisfies ModuleForgeSpec;
+
+          if (!moduleId) {
+            const { data, error } = await supabase
+              .from("template_modules")
+              .insert({
+                client_id: clientId,
+                kind,
+                name: cleanedName,
+                spec_json: nextSpec as any,
+                preview_path: null,
+              } as any)
+              .select("id")
+              .single();
+            if (error) throw error;
+            if (token !== autosaveTokenRef.current) return; // stale
+
+            const id = String((data as any)?.id ?? "");
+            if (!id) throw new Error("Auto-save succeeded but no id returned.");
+            lastSavedKeyRef.current = snapshotKeyForAutosave();
+            navigate(`/module-forge/edit/${encodeURIComponent(id)}`, { replace: true });
+            return;
+          }
+
+          // Best-effort preview update (SVG). Don't block autosave on it.
+          let previewPath: string | null = null;
+          try {
+            const svg = renderSvgPreview(nextSpec);
+            const blob = new Blob([svg], { type: "image/svg+xml" });
+            previewPath = `${moduleId}/preview.svg`;
+            const up = await supabase.storage.from("template_assets").upload(previewPath, blob, {
+              upsert: true,
+              contentType: "image/svg+xml",
+            });
+            if (up.error) previewPath = null;
+          } catch {
+            previewPath = null;
+          }
+
+          const { error } = await supabase
+            .from("template_modules")
+            .update({
+              kind,
+              name: cleanedName,
+              spec_json: nextSpec as any,
+              ...(previewPath ? { preview_path: previewPath } : {}),
+            } as any)
+            .eq("id", moduleId);
+          if (error) throw error;
+          if (token !== autosaveTokenRef.current) return; // stale
+
+          lastSavedKeyRef.current = snapshotKeyForAutosave();
+        } catch (e) {
+          console.warn("[moduleForge] autosave failed:", e);
+        }
+      })();
+    }, 800);
+
+    return () => {
+      if (autosaveTimerRef.current) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, moduleId, name, kind, spec]);
 
   // Slots-only guarantee for layout modules: strip non-slot elements when user switches kind.
   useEffect(() => {
@@ -736,6 +867,7 @@ export default function ModuleForgeEditorApp() {
         if (error) throw error;
         const id = String((data as any)?.id ?? "");
         if (!id) throw new Error("Save succeeded but no id returned.");
+        lastSavedKeyRef.current = snapshotKeyForAutosave();
         navigate(`/module-forge/edit/${encodeURIComponent(id)}`, { replace: true });
         return;
       }
@@ -765,11 +897,11 @@ export default function ModuleForgeEditorApp() {
           spec_json: nextSpec as any,
           ...(previewPath ? { preview_path: previewPath } : {}),
         } as any)
-        .eq("id", moduleId)
-        .eq("client_id", clientId);
+        .eq("id", moduleId);
       if (error) throw error;
 
       setName(cleanedName);
+      lastSavedKeyRef.current = snapshotKeyForAutosave();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -784,8 +916,7 @@ export default function ModuleForgeEditorApp() {
     setDeleting(true);
     setErr(null);
     try {
-      const clientId = getStudioClientId();
-      const { error } = await supabase.from("template_modules").delete().eq("id", moduleId).eq("client_id", clientId);
+      const { error } = await supabase.from("template_modules").delete().eq("id", moduleId);
       if (error) throw error;
       navigate("/module-forge/library");
     } catch (e) {
@@ -1450,12 +1581,27 @@ export default function ModuleForgeEditorApp() {
               {selected.type === "BackgroundTexture" ? (
                 <div className="space-y-1">
                   <label className="text-xs text-muted-foreground">fill</label>
-                  <input
-                    className="w-full border rounded px-3 py-2 text-sm bg-background"
-                    value={String(selected.props?.fill ?? "")}
-                    onChange={(e) => updateElement(selected.id, { props: { ...selected.props, fill: e.target.value } })}
-                    placeholder="#ffffff"
-                  />
+                  {(() => {
+                    const fillRaw = String(selected.props?.fill ?? "#f8fafc");
+                    const fillHex = normalizeHexColor(fillRaw, "#f8fafc");
+                    return (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          className="h-9 w-12 border rounded bg-background p-1"
+                          value={fillHex}
+                          onChange={(e) => updateElement(selected.id, { props: { ...selected.props, fill: e.target.value } })}
+                          title="Pick background fill color"
+                        />
+                        <input
+                          className="flex-1 border rounded px-3 py-2 text-sm bg-background font-mono"
+                          value={fillRaw}
+                          onChange={(e) => updateElement(selected.id, { props: { ...selected.props, fill: e.target.value } })}
+                          placeholder="#ffffff"
+                        />
+                      </div>
+                    );
+                  })()}
                 </div>
               ) : null}
 
@@ -1549,12 +1695,27 @@ export default function ModuleForgeEditorApp() {
                   ) : null}
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">stroke</label>
-                    <input
-                      className="w-full border rounded px-3 py-2 text-sm bg-background"
-                      value={String(selected.props?.stroke ?? "#e5e7eb")}
-                      onChange={(e) => updateElement(selected.id, { props: { ...selected.props, stroke: e.target.value } })}
-                      placeholder="#e5e7eb"
-                    />
+                    {(() => {
+                      const strokeRaw = String(selected.props?.stroke ?? "#e5e7eb");
+                      const strokeHex = normalizeHexColor(strokeRaw, "#e5e7eb");
+                      return (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="color"
+                            className="h-9 w-12 border rounded bg-background p-1"
+                            value={strokeHex}
+                            onChange={(e) => updateElement(selected.id, { props: { ...selected.props, stroke: e.target.value } })}
+                            title="Pick pattern stroke color"
+                          />
+                          <input
+                            className="flex-1 border rounded px-3 py-2 text-sm bg-background font-mono"
+                            value={strokeRaw}
+                            onChange={(e) => updateElement(selected.id, { props: { ...selected.props, stroke: e.target.value } })}
+                            placeholder="#e5e7eb"
+                          />
+                        </div>
+                      );
+                    })()}
                   </div>
                   <label className="flex items-center gap-2 text-sm">
                     <input

@@ -21,7 +21,7 @@ function defaultSpec(kind: TemplateModuleKind): ModuleForgeSpec {
 export default function ModuleForgeLibraryPage() {
   const navigate = useNavigate();
   const [sp, setSp] = useSearchParams();
-  const kind = ((sp.get("kind") ?? "layout").toLowerCase() as TemplateModuleKind) || "layout";
+  const filter = (sp.get("kind") ?? "all").toLowerCase() as "all" | TemplateModuleKind;
 
   const [rows, setRows] = useState<TemplateModuleRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -29,18 +29,20 @@ export default function ModuleForgeLibraryPage() {
 
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
+  const [createKind, setCreateKind] = useState<TemplateModuleKind>("layout");
 
-  const filtered = useMemo(() => rows.filter((r) => r.kind === kind), [rows, kind]);
+  const filtered = useMemo(() => {
+    if (filter === "all") return rows;
+    return rows.filter((r) => r.kind === filter);
+  }, [rows, filter]);
 
   async function refresh() {
     setErr(null);
     setLoading(true);
     try {
-      const clientId = getStudioClientId();
       const { data, error } = await supabase
         .from("template_modules")
         .select("id,client_id,kind,name,spec_json,preview_path,created_at,updated_at")
-        .eq("client_id", clientId)
         .order("updated_at", { ascending: false });
       if (error) throw error;
 
@@ -69,12 +71,18 @@ export default function ModuleForgeLibraryPage() {
 
   useEffect(() => {
     // keep `kind` query param sane
-    if (kind !== "layout" && kind !== "module") {
-      setSp({ kind: "layout" }, { replace: true });
+    if (filter !== "all" && filter !== "layout" && filter !== "module") {
+      setSp({ kind: "all" }, { replace: true });
     }
-  }, [kind, setSp]);
+  }, [filter, setSp]);
+
+  // Keep the create kind aligned with the current filter (unless in "all", where it's user-chosen).
+  useEffect(() => {
+    if (filter === "layout" || filter === "module") setCreateKind(filter);
+  }, [filter]);
 
   async function createModule() {
+    const kind = createKind;
     const name = newName.trim() || (kind === "layout" ? "Untitled layout" : "Untitled module");
     setCreating(true);
     setErr(null);
@@ -104,6 +112,12 @@ export default function ModuleForgeLibraryPage() {
     }
   }
 
+  function badgeClasses(kind: TemplateModuleKind): string {
+    return kind === "layout"
+      ? "bg-blue-100 text-blue-900 border-blue-200"
+      : "bg-emerald-100 text-emerald-900 border-emerald-200";
+  }
+
   return (
     <div className="h-full w-full overflow-auto">
       <div className="max-w-6xl mx-auto p-6 space-y-6">
@@ -122,13 +136,19 @@ export default function ModuleForgeLibraryPage() {
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <button
-              className={`px-3 py-2 text-sm border rounded ${kind === "layout" ? "bg-accent" : "hover:bg-accent"}`}
+              className={`px-3 py-2 text-sm border rounded ${filter === "all" ? "bg-accent" : "hover:bg-accent"}`}
+              onClick={() => setSp({ kind: "all" })}
+            >
+              All
+            </button>
+            <button
+              className={`px-3 py-2 text-sm border rounded ${filter === "layout" ? "bg-accent" : "hover:bg-accent"}`}
               onClick={() => setSp({ kind: "layout" })}
             >
               Layouts
             </button>
             <button
-              className={`px-3 py-2 text-sm border rounded ${kind === "module" ? "bg-accent" : "hover:bg-accent"}`}
+              className={`px-3 py-2 text-sm border rounded ${filter === "module" ? "bg-accent" : "hover:bg-accent"}`}
               onClick={() => setSp({ kind: "module" })}
             >
               Modules
@@ -139,18 +159,36 @@ export default function ModuleForgeLibraryPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            {filter === "all" ? (
+              <div className="flex items-center gap-1 border rounded bg-background p-1">
+                <button
+                  className={`px-2 py-1 text-xs border rounded ${createKind === "layout" ? "bg-accent" : "hover:bg-accent"}`}
+                  onClick={() => setCreateKind("layout")}
+                  type="button"
+                >
+                  Layout
+                </button>
+                <button
+                  className={`px-2 py-1 text-xs border rounded ${createKind === "module" ? "bg-accent" : "hover:bg-accent"}`}
+                  onClick={() => setCreateKind("module")}
+                  type="button"
+                >
+                  Module
+                </button>
+              </div>
+            ) : null}
             <input
               className="border rounded px-3 py-2 text-sm bg-background w-56"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              placeholder={kind === "layout" ? "New layout name" : "New module name"}
+              placeholder={createKind === "layout" ? "New layout name" : "New module name"}
             />
             <button
               className="px-3 py-2 text-sm border rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
               onClick={createModule}
               disabled={creating}
             >
-              {creating ? "Creating…" : kind === "layout" ? "Create layout" : "Create module"}
+              {creating ? "Creating…" : createKind === "layout" ? "Create layout" : "Create module"}
             </button>
           </div>
         </div>
@@ -165,7 +203,11 @@ export default function ModuleForgeLibraryPage() {
                 to={`/module-forge/edit/${encodeURIComponent(m.id)}`}
                 className="border rounded-xl bg-card hover:bg-accent/30 transition-colors p-4"
               >
-                <div className="text-xs text-muted-foreground">{m.kind}</div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`text-[10px] px-2 py-0.5 rounded border ${badgeClasses(m.kind)} uppercase tracking-wide`}>
+                    {m.kind}
+                  </span>
+                </div>
                 <div className="font-semibold mt-1 truncate">{m.name || "Untitled"}</div>
                 <div className="text-xs text-muted-foreground mt-2">
                   Updated: {m.updated_at ? new Date(m.updated_at).toLocaleString() : "—"}
@@ -174,7 +216,7 @@ export default function ModuleForgeLibraryPage() {
             ))}
             {filtered.length === 0 ? (
               <div className="text-sm text-muted-foreground border rounded-xl p-4 bg-card">
-                No {kind === "layout" ? "layouts" : "modules"} yet.
+                No {filter === "layout" ? "layouts" : filter === "module" ? "modules" : "items"} yet.
               </div>
             ) : null}
           </div>

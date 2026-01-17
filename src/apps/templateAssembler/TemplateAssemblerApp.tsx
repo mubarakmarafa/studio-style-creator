@@ -56,6 +56,10 @@ export default function TemplateAssemblerApp() {
   const [nodes, setNodes, onNodesChange] = useNodesState<TANode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<TAEdge>([]);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  useEffect(() => {
+    savingRef.current = saving;
+  }, [saving]);
 
   const graphJson: GraphJson = useMemo(() => ({ version: 1, nodes, edges }), [nodes, edges]);
 
@@ -87,6 +91,13 @@ export default function TemplateAssemblerApp() {
   const reactFlowWrapperRef = useRef<HTMLDivElement | null>(null);
   const reactFlowInstanceRef = useRef<any | null>(null);
   const spawnIndexRef = useRef(0);
+
+  // Autosave (debounced). We avoid saving immediately after loading to prevent creating new rows
+  // just by opening the editor. We only persist once the user changes something.
+  const initialSnapshotKeyRef = useRef<string | null>(null);
+  const lastSavedKeyRef = useRef<string | null>(null);
+  const autosaveTimerRef = useRef<number | null>(null);
+  const autosaveTokenRef = useRef(0);
 
   const nodeTypes = useMemo(
     () => ({
@@ -194,11 +205,9 @@ export default function TemplateAssemblerApp() {
 
   async function refreshModules() {
     try {
-      const clientId = getStudioClientId();
       const { data, error } = await supabase
         .from("template_modules")
         .select("id,kind,name,spec_json")
-        .eq("client_id", clientId)
         .order("updated_at", { ascending: false });
       if (error) throw error;
       const rows = (data ?? []) as any[];
@@ -301,12 +310,10 @@ export default function TemplateAssemblerApp() {
         await refreshModules();
         return;
       }
-      const clientId = getStudioClientId();
       const { data, error } = await supabase
         .from("template_assemblies")
         .select("id,client_id,name,description,graph_json,created_at,updated_at")
         .eq("id", assemblyId)
-        .eq("client_id", clientId)
         .maybeSingle();
       if (error) throw error;
       if (!data) throw new Error("Assembly not found.");
@@ -334,6 +341,100 @@ export default function TemplateAssemblerApp() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assemblyId]);
+
+  function snapshotKeyForAutosave(): string {
+    return JSON.stringify({
+      v: 1,
+      name: name.trim() || "Untitled assembly",
+      description: description.trim(),
+      graph: graphJson,
+    });
+  }
+
+  // Seed baseline keys after we finish loading an assembly (or default graph for new).
+  useEffect(() => {
+    if (loading) return;
+    const key = snapshotKeyForAutosave();
+    initialSnapshotKeyRef.current = key;
+    lastSavedKeyRef.current = key;
+    // Clear any pending timers when switching assemblies / finishing load
+    if (autosaveTimerRef.current) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, assemblyId]);
+
+  // Debounced autosave when content changes.
+  useEffect(() => {
+    if (loading) return;
+    if (savingRef.current) return;
+
+    const key = snapshotKeyForAutosave();
+    const baseline = initialSnapshotKeyRef.current;
+    const lastSaved = lastSavedKeyRef.current;
+    const isDirty = baseline ? key !== baseline : true;
+    const alreadySaved = lastSaved ? key === lastSaved : false;
+    if (!isDirty || alreadySaved) return;
+
+    if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(() => {
+      const token = ++autosaveTokenRef.current;
+      void (async () => {
+        try {
+          const clientId = getStudioClientId();
+          const cleanedName = name.trim() || "Untitled assembly";
+          const cleanedDescription = description.trim();
+
+          // Create-on-first-edit if there isn't an id yet.
+          if (!assemblyId) {
+            const { data, error } = await supabase
+              .from("template_assemblies")
+              .insert({
+                client_id: clientId,
+                name: cleanedName,
+                description: cleanedDescription,
+                graph_json: graphJson as any,
+              } as any)
+              .select("id")
+              .single();
+            if (error) throw error;
+            if (token !== autosaveTokenRef.current) return; // stale
+
+            const id = String((data as any)?.id ?? "");
+            if (!id) throw new Error("Auto-save succeeded but no id returned.");
+            lastSavedKeyRef.current = snapshotKeyForAutosave();
+            navigate(`/template-assembler/edit/${encodeURIComponent(id)}`, { replace: true });
+            return;
+          }
+
+          const { error } = await supabase
+            .from("template_assemblies")
+            .update({
+              name: cleanedName,
+              description: cleanedDescription,
+              graph_json: graphJson as any,
+            } as any)
+            .eq("id", assemblyId);
+          if (error) throw error;
+          if (token !== autosaveTokenRef.current) return; // stale
+
+          lastSavedKeyRef.current = snapshotKeyForAutosave();
+        } catch (e) {
+          // Don't spam global errors on background autosave; surface once.
+          console.warn("[templateAssembler] autosave failed:", e);
+        }
+      })();
+    }, 900);
+
+    return () => {
+      if (autosaveTimerRef.current) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, assemblyId, name, description, graphJson]);
 
   // Reset hydration marker when switching assemblies.
   useEffect(() => {
@@ -540,7 +641,7 @@ export default function TemplateAssemblerApp() {
       return out;
   }
 
-  function generateTemplatesPreview(assemblerNodeId: string) {
+  async function generateTemplatesPreview(assemblerNodeId: string): Promise<void> {
     const { count, error } = validateAndCountForAssembler(assemblerNodeId);
     setCombinationCount(count);
     setCombinationError(error);
@@ -602,26 +703,24 @@ export default function TemplateAssemblerApp() {
     }
 
     if (useLlmFill && String(prompt ?? "").trim()) {
-      void (async () => {
-        try {
-          const overrides = await generateSlotTextOverridesWithLlm(layoutsForAsm, combos, String(prompt ?? "").trim());
-          const rebuilt = combos.map((c) => {
-            const l = layoutsForAsm.find((x) => x.layoutId === c.layoutId);
-            if (!l) return c;
-            return {
-              ...c,
-              template_spec_json: assembleTemplateSpec(l.layoutSpec, l.slotRects, c.mapping, prompt, overrides),
-            };
-          });
-          setGeneratedTemplates(rebuilt);
-          setResultsOpen(true);
-          setLlmNotice(null);
-        } catch (e) {
-          setGeneratedTemplates(combos);
-          setResultsOpen(true);
-          setLlmNotice(e instanceof Error ? e.message : String(e));
-        }
-      })();
+      try {
+        const overrides = await generateSlotTextOverridesWithLlm(layoutsForAsm, combos, String(prompt ?? "").trim());
+        const rebuilt = combos.map((c) => {
+          const l = layoutsForAsm.find((x) => x.layoutId === c.layoutId);
+          if (!l) return c;
+          return {
+            ...c,
+            template_spec_json: assembleTemplateSpec(l.layoutSpec, l.slotRects, c.mapping, prompt, overrides),
+          };
+        });
+        setGeneratedTemplates(rebuilt);
+        setResultsOpen(true);
+        setLlmNotice(null);
+      } catch (e) {
+        setGeneratedTemplates(combos);
+        setResultsOpen(true);
+        setLlmNotice(e instanceof Error ? e.message : String(e));
+      }
     } else {
       setGeneratedTemplates(combos);
       setResultsOpen(true);
@@ -1302,6 +1401,150 @@ export default function TemplateAssemblerApp() {
         return Math.max(1, Number(e?.rect?.h ?? 40) || 40);
       }
 
+      // Special-case stack modules: lay out directly in slot-space (uniform text/padding scale),
+      // so extra slot height goes into "fill" elements (BodyText/Pattern) instead of inflating top padding.
+      if (isStackModule) {
+        const sorted = modEls
+          .slice()
+          .sort((a: any, b: any) => (Number(a?.zIndex ?? 0) || 0) - (Number(b?.zIndex ?? 0) || 0));
+
+        const scaleText = Math.max(0.01, Math.min(slotRect.w / canvasW, slotRect.h / canvasH));
+        const pad = Math.max(6, Math.min(32, STACK_PAD * scaleText));
+        const gap = Math.max(4, Math.min(24, STACK_GAP * scaleText));
+        const innerW = Math.max(1, slotRect.w - pad * 2);
+        const innerH = Math.max(1, slotRect.h - pad * 2);
+
+        const tmp = { header: 0, title: 0, body: 0 };
+        const fixedHeights: number[] = [];
+        const fillIdx: number[] = [];
+        for (let i = 0; i < sorted.length; i++) {
+          const e = sorted[i];
+          const type = String(e?.type ?? "");
+          const preset = presetOf(e);
+          if (preset === "fill") {
+            fillIdx.push(i);
+            fixedHeights.push(0);
+            continue;
+          }
+          if (preset === "fit") {
+            fixedHeights.push(fittedHeightFor(e, tmp, innerW) * scaleText);
+            continue;
+          }
+          if (type === "Divider") {
+            const t = Math.max(1, Number(e?.props?.thickness ?? 2) || 2);
+            fixedHeights.push(t * scaleText);
+            continue;
+          }
+          // fixed
+          fixedHeights.push(Math.max(1, (Number(e?.rect?.h ?? 40) || 40) * scaleText));
+        }
+
+        const gapsTotal = sorted.length > 0 ? gap * (sorted.length - 1) : 0;
+        const fixedTotal = fixedHeights.reduce((s, h) => s + h, 0);
+        const remaining = Math.max(1, innerH - gapsTotal - fixedTotal);
+        const fillH = fillIdx.length > 0 ? Math.max(1, remaining / fillIdx.length) : 0;
+
+        let yCursor = slotRect.y + pad;
+        for (let i = 0; i < sorted.length; i++) {
+          const e = sorted[i];
+          const type = String(e?.type ?? "");
+          const preset = presetOf(e);
+          const rectH =
+            preset === "fill"
+              ? fillH
+              : preset === "fit"
+                ? fixedHeights[i]
+                : type === "Divider"
+                  ? fixedHeights[i]
+                  : fixedHeights[i];
+
+          const nx = slotRect.x + pad;
+          const ny = yCursor;
+          const nw = innerW;
+          const nh = rectH;
+
+          const baseProps: Record<string, any> = { ...(e?.props ?? {}), __slotKey: slotKey };
+          const overrideKey = `${slotKey}|${moduleId}`;
+          const o = overrides?.[overrideKey];
+
+          if (type === "Divider") {
+            const thickness = Math.max(1, Number(baseProps?.thickness ?? 2) || 2) * scaleText;
+            outEls.push({
+              ...e,
+              id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
+              rect: { x: nx, y: ny, w: nw, h: Math.max(1, thickness) },
+              zIndex: z++,
+              props: { ...baseProps, thickness },
+            });
+          } else if (type === "Pattern") {
+            const spacing = Math.max(6, Number(baseProps?.spacing ?? 16) || 16) * scaleText;
+            const outlineThickness = Math.max(0, Number(baseProps?.outlineThickness ?? 2) || 0) * scaleText;
+            outEls.push({
+              ...e,
+              id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
+              rect: { x: nx, y: ny, w: nw, h: nh },
+              zIndex: z++,
+              props: { ...baseProps, spacing, outlineThickness },
+            });
+          } else if (type === "Header") {
+            const headerText = String(o?.headers?.[headerIdx] ?? headerPlaceholder(headerIdx));
+            headerIdx++;
+            const fontSize = Math.max(8, Number(baseProps?.fontSize ?? 24) || 24) * scaleText;
+            const lineHeight = Math.max(1, Number(baseProps?.lineHeight ?? 1.2) || 1.2);
+            const color = String(baseProps?.color ?? "#111827");
+            outEls.push({
+              ...e,
+              id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
+              rect: { x: nx, y: ny, w: nw, h: nh },
+              zIndex: z++,
+              props: { ...baseProps, text: headerText, fontSize, lineHeight, color },
+            });
+          } else if (type === "Title") {
+            const titleText = String(
+              o?.titles?.[titleIdx] ??
+                (topic ? titleCase(topic) : titleIdx === 0 ? "This is a title" : "This is another title"),
+            );
+            titleIdx++;
+            const fontSize = Math.max(8, Number(baseProps?.fontSize ?? 18) || 18) * scaleText;
+            const lineHeight = Math.max(1, Number(baseProps?.lineHeight ?? 1.25) || 1.25);
+            const color = String(baseProps?.color ?? "#111827");
+            outEls.push({
+              ...e,
+              id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
+              rect: { x: nx, y: ny, w: nw, h: nh },
+              zIndex: z++,
+              props: { ...baseProps, text: titleText, fontSize, lineHeight, color },
+            });
+          } else if (type === "BodyText") {
+            const bodyText = String(o?.bodies?.[bodyIdx] ?? bodyPlaceholder(bodyIdx));
+            bodyIdx++;
+            const fontSize = Math.max(8, Number(baseProps?.fontSize ?? 12) || 12) * scaleText;
+            const lineHeight = Math.max(1, Number(baseProps?.lineHeight ?? 1.35) || 1.35);
+            const color = String(baseProps?.color ?? "#111827");
+            outEls.push({
+              ...e,
+              id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
+              rect: { x: nx, y: ny, w: nw, h: nh },
+              zIndex: z++,
+              props: { ...baseProps, text: bodyText, fontSize, lineHeight, color },
+            });
+          } else {
+            outEls.push({
+              ...e,
+              id: `slot_${slotKey}_${String(e?.id ?? "el")}`,
+              rect: { x: nx, y: ny, w: nw, h: nh },
+              zIndex: z++,
+              props: baseProps,
+            });
+          }
+
+          yCursor += nh + gap;
+        }
+
+        // Stack module handled fully in slot-space; skip bounds-based scaling below.
+        continue;
+      }
+
       let sourceEls: any[] = modEls;
       if (isStackModule) {
         const innerW = Math.max(1, canvasW - STACK_PAD * 2);
@@ -1532,6 +1775,8 @@ export default function TemplateAssemblerApp() {
         if (error) throw error;
         const id = String((data as any)?.id ?? "");
         if (!id) throw new Error("Save succeeded but no id returned.");
+        // Mark saved state before navigation to avoid an immediate autosave loop.
+        lastSavedKeyRef.current = snapshotKeyForAutosave();
         navigate(`/template-assembler/edit/${encodeURIComponent(id)}`, { replace: true });
         return;
       }
@@ -1543,11 +1788,11 @@ export default function TemplateAssemblerApp() {
           description: description.trim(),
           graph_json: graphJson as any,
         } as any)
-        .eq("id", assemblyId)
-        .eq("client_id", clientId);
+        .eq("id", assemblyId);
       if (error) throw error;
 
       setName(cleanedName);
+      lastSavedKeyRef.current = snapshotKeyForAutosave();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
